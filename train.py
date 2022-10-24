@@ -10,10 +10,13 @@ from torch import nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
 
+import asdfghjkl as asdl
+from asdfghjkl import FISHER_MC, FISHER_EMP
 from torchvision_ref import presets, transforms, utils
 
+# TODO: KL-clip
 
-def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema=None):
+def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args, model_ema=None):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
@@ -23,11 +26,16 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, arg
     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         start_time = time.time()
         image, target = image.to(device), target.to(device)
-        output = model(image)
-        loss = criterion(output, target)
 
         optimizer.zero_grad()
-        loss.backward()
+        dummy_y = grad_maker.setup_model_call(model, image)
+        loss_func = torch.nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+        grad_maker.setup_loss_call(loss_func, dummy_y, target)
+        if isinstance(grad_maker, asdl.precondition.natural_gradient.KfacGradientMaker):
+            output, loss = grad_maker.forward_and_backward(accumulate=True)
+        else:
+            output, loss = grad_maker.forward_and_backward()
+
         if args.clip_grad_norm is not None:
             nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
         optimizer.step()
@@ -194,7 +202,13 @@ def main(args):
         parameters = [{"params": p, "weight_decay": w} for p, w in zip(param_groups, wd_groups) if p]
 
     opt_name = args.opt.lower()
-    if opt_name.startswith("sgd"):
+    if opt_name == "rmsprop":
+        optimizer = torch.optim.RMSprop(
+            parameters, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, eps=0.0316, alpha=0.9
+        )
+    elif opt_name == "adamw":
+        optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
+    elif opt_name in ("sgd", "kfac_mc", "kfac_emp"):
         optimizer = torch.optim.SGD(
             parameters,
             lr=args.lr,
@@ -202,14 +216,27 @@ def main(args):
             weight_decay=args.weight_decay,
             nesterov="nesterov" in opt_name,
         )
-    elif opt_name == "rmsprop":
-        optimizer = torch.optim.RMSprop(
-            parameters, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, eps=0.0316, alpha=0.9
-        )
-    elif opt_name == "adamw":
-        optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
+
+    if opt_name == "kfac_mc":
+        config = asdl.NaturalGradientConfig(data_size=args.batch_size,
+                                            fisher_type=FISHER_MC,
+                                            damping=args.damping,
+                                            curvature_upd_interval=args.cov_update_freq,
+                                            preconditioner_upd_interval=args.inv_update_freq,
+                                            ignore_modules=[nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm],
+                                            ema_decay=args.ema_decay)
+        grad_maker = asdl.KfacGradientMaker(model, config, swift=False)
+    elif opt_name == "kfac_emp":
+        config = asdl.NaturalGradientConfig(data_size=args.batch_size,
+                                            fisher_type=FISHER_EMP,
+                                            damping=args.damping,
+                                            curvature_upd_interval=args.cov_update_freq,
+                                            preconditioner_upd_interval=args.inv_update_freq,
+                                            ignore_modules=[nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm],
+                                            ema_decay=args.ema_decay)
+        grad_maker = asdl.KfacGradientMaker(model, config, swift=False)
     else:
-        raise RuntimeError(f"Invalid optimizer {args.opt}. Only SGD, RMSprop and AdamW are supported.")
+        grad_maker = asdl.GradientMaker(model)
 
     args.lr_scheduler = args.lr_scheduler.lower()
     if args.lr_scheduler == "steplr":
@@ -283,7 +310,7 @@ def main(args):
     print("Start training")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
-        train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema)
+        train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args, model_ema)
         lr_scheduler.step()
         evaluate(model, criterion, data_loader_test, device=device)
         if model_ema:
@@ -320,7 +347,7 @@ def get_args_parser(add_help=True):
     parser.add_argument(
         "-j", "--workers", default=16, type=int, metavar="N", help="number of data loading workers (default: 16)"
     )
-    parser.add_argument("--opt", default="sgd", type=str, help="optimizer")
+    parser.add_argument("--opt", default="sgd", type=str, help="optimizer", choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
     parser.add_argument("--lr", default=0.1, type=float, help="initial learning rate")
     parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum")
     parser.add_argument(
@@ -411,6 +438,12 @@ def get_args_parser(add_help=True):
 
     parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
 
+    # K-FAC
+    parser.add_argument('--cov-update-freq', type=int, default=10)
+    parser.add_argument('--inv-update-freq', type=int, default=100)
+    parser.add_argument('--ema-decay', type=float, default=0.05)
+    parser.add_argument('--damping', type=float, default=0.001)
+    parser.add_argument('--kl-clip', type=float, default=0.001)
     return parser
 
 
