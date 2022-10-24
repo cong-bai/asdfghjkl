@@ -214,6 +214,8 @@ def main(args):
     args.lr_scheduler = args.lr_scheduler.lower()
     if args.lr_scheduler == "steplr":
         main_lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
+    elif args.lr_scheduler == "multisteplr":
+        main_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, args.lr_decay_epoch, gamma=args.lr_gamma)
     elif args.lr_scheduler == "cosineannealinglr":
         main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, T_max=args.epochs - args.lr_warmup_epochs
@@ -222,8 +224,8 @@ def main(args):
         main_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.lr_gamma)
     else:
         raise RuntimeError(
-            f"Invalid lr scheduler '{args.lr_scheduler}'. Only StepLR, CosineAnnealingLR and ExponentialLR "
-            "are supported."
+            f"Invalid lr scheduler '{args.lr_scheduler}'. Only StepLR, MultiStepLR, "
+            "CosineAnnealingLR and ExponentialLR are supported."
         )
 
     if args.lr_warmup_epochs > 0:
@@ -348,6 +350,7 @@ def get_args_parser(add_help=True):
     )
     parser.add_argument("--lr-warmup-decay", default=0.01, type=float, help="the decay for lr")
     parser.add_argument("--lr-step-size", default=30, type=int, help="decrease lr every step-size epochs")
+    parser.add_argument('--lr-decay-epoch', nargs='+', type=int, default=[15, 25, 30])
     parser.add_argument("--lr-gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
     parser.add_argument("--print-freq", default=10, type=int, help="print frequency")
     parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
