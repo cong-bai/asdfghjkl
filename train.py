@@ -345,7 +345,7 @@ def get_args_parser(add_help=True):
     )
     parser.add_argument("--epochs", default=90, type=int, metavar="N", help="number of total epochs to run")
     parser.add_argument(
-        "-j", "--workers", default=16, type=int, metavar="N", help="number of data loading workers (default: 16)"
+        "-j", "--workers", default=6, type=int, metavar="N", help="number of data loading workers (default: 16)"
     )
     parser.add_argument("--opt", default="sgd", type=str, help="optimizer", choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
     parser.add_argument("--lr", default=0.1, type=float, help="initial learning rate")
@@ -379,7 +379,7 @@ def get_args_parser(add_help=True):
     parser.add_argument("--lr-step-size", default=30, type=int, help="decrease lr every step-size epochs")
     parser.add_argument('--lr-decay-epoch', nargs='+', type=int, default=[15, 25, 30])
     parser.add_argument("--lr-gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
-    parser.add_argument("--print-freq", default=10, type=int, help="print frequency")
+    parser.add_argument("--print-freq", default=50, type=int, help="print frequency")
     parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
     parser.add_argument("--resume", default="", type=str, help="path of checkpoint")
     parser.add_argument("--start-epoch", default=0, type=int, metavar="N", help="start epoch")
