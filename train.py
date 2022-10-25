@@ -118,7 +118,7 @@ def load_data(traindir, valdir, args):
             print(f"Saving dataset_train to {cache_path}")
             utils.mkdir(os.path.dirname(cache_path))
             utils.save_on_master((dataset, traindir), cache_path)
-    print("Took", time.time() - st)
+    print(f"Took {time.time() - st:.2f}s")
 
     print("Loading validation data")
     cache_path = _get_cache_path(valdir)
