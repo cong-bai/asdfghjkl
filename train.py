@@ -3,6 +3,7 @@ import datetime
 import os
 import time
 
+import timm
 import torch
 import torch.utils.data
 import torchvision
@@ -189,7 +190,14 @@ def main(args):
     )
 
     print("Creating model")
-    model = torchvision.models.__dict__[args.model](pretrained=args.pretrained, num_classes=num_classes)
+    if args.model.startswith("timm_"):
+        model = timm.create_model(
+            args.model.replace("timm_", ""), pretrained=args.pretrained, num_classes=num_classes
+        )
+    else:
+        model = torchvision.models.__dict__[args.model](
+            pretrained=args.pretrained, num_classes=num_classes
+        )
     model.to(device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
@@ -338,6 +346,7 @@ def get_args_parser(add_help=True):
     parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
 
     parser.add_argument("--data-path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
+    # To use a timm model, add "timm_" before the timm model name, e.g. timm_vit_tiny_patch16_224
     parser.add_argument("--model", default="resnet18", type=str, help="model name")
     parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
     parser.add_argument(
