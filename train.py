@@ -11,12 +11,12 @@ from torch import nn
 
 import asdfghjkl as asdl
 from asdfghjkl import FISHER_MC, FISHER_EMP
-from trainutils.dataset import load_data, get_dataloader
+from trainutils.dataset import load_data
 from trainutils.visionref import utils
 
 # TODO: KL-clip
 
-def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args):
+def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mixup_fn, args):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
@@ -26,10 +26,15 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, ar
     for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         start_time = time.time()
         image, target = image.to(device), target.to(device)
+        loss_func = torch.nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
+        if mixup_fn:
+            image = image[:image.shape[0] // 2 * 2, :, :, :] # In mixup_fn, batch size must be even
+            target = target[:target.shape[0] // 2 * 2]
+            image, target = mixup_fn(image, target)
+            loss_func = torch.nn.CrossEntropyLoss()
 
         optimizer.zero_grad()
         dummy_y = grad_maker.setup_model_call(model, image)
-        loss_func = torch.nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
         grad_maker.setup_loss_call(loss_func, dummy_y, target)
         if isinstance(grad_maker, asdl.precondition.natural_gradient.KfacGradientMaker):
             output, loss = grad_maker.forward_and_backward(accumulate=True)
@@ -93,7 +98,22 @@ def main(args):
 
     dataset, dataset_test = load_data(train_dir, val_dir, args.val_resize_size, args.val_crop_size, args.train_crop_size, args.interpolation)
     num_classes = len(dataset.classes)
-    data_loader, data_loader_test = get_dataloader(dataset, dataset_test, args.mixup_alpha, args.cutmix_alpha, args.batch_size, args.workers)
+    data_loader = torch.utils.data.DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        pin_memory=True,
+        shuffle=True,
+    )
+    data_loader_test = torch.utils.data.DataLoader(
+        dataset_test,
+        batch_size=args.batch_size,
+        num_workers=args.workers,
+        pin_memory=True,
+    )
+    mixup_fn = None
+    if args.mixup_alpha > 0 or args.cutmix_alpha > 0:
+        mixup_fn = timm.data.Mixup(args.mixup_alpha, args.cutmix_alpha, label_smoothing=args.label_smoothing, num_classes=num_classes)
 
     print("Creating model")
     if args.model.startswith("timm_"):
@@ -198,7 +218,7 @@ def main(args):
     print("Start training")
     start_time = time.time()
     for epoch in range(args.epochs):
-        train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args)
+        train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mixup_fn, args)
         lr_scheduler.step()
         evaluate(model, criterion, data_loader_test, device=device)
         if args.output_dir:

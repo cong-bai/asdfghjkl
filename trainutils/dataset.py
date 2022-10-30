@@ -2,11 +2,8 @@ import time
 
 import torch
 import torchvision
-from torch.utils.data.dataloader import default_collate
 from torchvision.transforms import autoaugment, transforms
 from torchvision.transforms.functional import InterpolationMode
-
-from .visionref import mixup
 
 
 class ClassificationPresetTrain:
@@ -99,31 +96,3 @@ def load_data(traindir, valdir, val_resize_size, val_crop_size, train_crop_size,
     )
 
     return dataset, dataset_test
-
-
-def get_dataloader(dataset, dataset_test, mixup_alpha, cutmix_alpha, batch_size, workers):
-    collate_fn = None
-    num_classes = len(dataset.classes)
-    mixup_transforms = []
-    if mixup_alpha > 0.0:
-        mixup_transforms.append(mixup.RandomMixup(num_classes, p=1.0, alpha=mixup_alpha))
-    if cutmix_alpha > 0.0:
-        mixup_transforms.append(mixup.RandomCutmix(num_classes, p=1.0, alpha=cutmix_alpha))
-    if mixup_transforms:
-        mixupcutmix = torchvision.transforms.RandomChoice(mixup_transforms)
-        collate_fn = lambda batch: mixupcutmix(*default_collate(batch))  # noqa: E731
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=batch_size,
-        num_workers=workers,
-        pin_memory=True,
-        collate_fn=collate_fn,
-        shuffle=True,
-    )
-    data_loader_test = torch.utils.data.DataLoader(
-        dataset_test,
-        batch_size=batch_size,
-        num_workers=workers,
-        pin_memory=True,
-    )
-    return data_loader, data_loader_test
