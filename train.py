@@ -23,7 +23,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mi
     metric_logger.add_meter("img/s", utils.SmoothedValue(window_size=10, fmt="{value}"))
 
     header = f"Epoch: [{epoch}]"
-    for i, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
+    for _, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         start_time = time.time()
         image, target = image.to(device), target.to(device)
         loss_func = torch.nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
@@ -96,20 +96,23 @@ def main(args):
     train_dir = os.path.join(args.data_path, "train")
     val_dir = os.path.join(args.data_path, "val")
 
-    dataset, dataset_test = load_data(train_dir, val_dir, args.val_resize_size, args.val_crop_size, args.train_crop_size, args.interpolation)
+    dataset, dataset_test = load_data(args.dataset, train_dir, val_dir, args.val_input_size, args.val_crop_pct, args.train_input_size, args.interpolation, args.auto_augment, args.random_erase)
     num_classes = len(dataset.classes)
+    persist_dataset = args.dataset == "cifar10"
     data_loader = torch.utils.data.DataLoader(
         dataset,
         batch_size=args.batch_size,
         num_workers=args.workers,
         pin_memory=True,
         shuffle=True,
+        persistent_workers=persist_dataset,
     )
     data_loader_test = torch.utils.data.DataLoader(
         dataset_test,
         batch_size=args.batch_size,
         num_workers=args.workers,
         pin_memory=True,
+        persistent_workers=persist_dataset,
     )
     mixup_fn = None
     if args.mixup_alpha > 0 or args.cutmix_alpha > 0:
@@ -229,8 +232,8 @@ def main(args):
                 "epoch": epoch,
                 "args": args,
             }
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+            # utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+            # utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -241,31 +244,32 @@ def get_args_parser():
 
     parser = argparse.ArgumentParser(description="PyTorch Classification Training")
 
+    parser.add_argument("--dataset", default="cifar10", type=str)
     parser.add_argument("--data-path", default="/root/autodl-tmp/imagenet", type=str)
-    # To use a timm model, add "timm_" before the timm model name, e.g. timm_vit_tiny_patch16_224
-    parser.add_argument("--model", default="timm_vit_tiny_patch16_224", type=str)
+    # To use a timm model, add "timm_" before the timm model name, e.g. timm_deit_tiny_patch16_224
+    parser.add_argument("--model", default="timm_deit_tiny_patch16_224", type=str)
     parser.add_argument("--pretrained", dest="pretrained", action="store_true")
 
     parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
-    parser.add_argument("--batch-size", default=256, type=int)
+    parser.add_argument("--batch-size", default=768, type=int)
     parser.add_argument("--test-only", dest="test_only", action="store_true")
-    parser.add_argument("--epochs", default=40, type=int)
+    parser.add_argument("--epochs", default=1000, type=int)
     parser.add_argument("--workers", default=6, type=int)
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--output-dir", default=".", type=str)
 
-    parser.add_argument("--opt", default="kfac_mc", type=str, choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
+    parser.add_argument("--opt", default="sgd", type=str, choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
     parser.add_argument("--lr", default=0.01, type=float)
-    parser.add_argument("--momentum", default=0.9, type=float)
-    parser.add_argument("--weight-decay", default=5e-5, type=float)
+    parser.add_argument("--momentum", default=0, type=float)
+    parser.add_argument("--weight-decay", default=1e-4, type=float)
     parser.add_argument("--norm-weight-decay", default=None, type=float) # WD For norm layers
-    parser.add_argument("--lr-scheduler", default="multisteplr", type=str)
-    parser.add_argument("--lr-warmup-epochs", default=0, type=int)
+    parser.add_argument("--lr-scheduler", default="cosineannealinglr", type=str)
+    parser.add_argument("--lr-warmup-epochs", default=5, type=int)
     parser.add_argument("--lr-warmup-method", default="linear", type=str)
-    parser.add_argument("--lr-warmup-decay", default=0.125, type=float) # First epoch lr decay
-    parser.add_argument("--lr-step-size", default=30, type=int)
+    parser.add_argument("--lr-warmup-decay", default=0.1, type=float) # First epoch lr decay
+    parser.add_argument("--lr-step-size", default=None, type=int)
     parser.add_argument('--lr-decay-epoch', nargs='+', type=int, default=[15, 25, 30])
-    parser.add_argument("--lr-gamma", default=0.1, type=float)
+    parser.add_argument("--lr-gamma", default=None, type=float)
     # K-FAC
     parser.add_argument('--cov-update-freq', type=int, default=10)
     parser.add_argument('--inv-update-freq', type=int, default=100)
@@ -274,17 +278,19 @@ def get_args_parser():
     parser.add_argument('--kl-clip', type=float, default=0.001)
 
     parser.add_argument("--interpolation", default="bilinear", type=str)
-    parser.add_argument("--val-resize-size", default=256, type=int)
-    parser.add_argument("--val-crop-size", default=224, type=int)
-    parser.add_argument("--train-crop-size", default=224, type=int)
-    parser.add_argument("--auto-augment", default=None, type=str)
+    parser.add_argument("--val-input-size", default=224, type=int)
+    parser.add_argument("--val-crop-pct", default=1, type=int)
+    parser.add_argument("--train-input-size", default=224, type=int)
+    parser.add_argument("--auto-augment", default="rand-m9-mstd0.5-inc1", type=str)
     parser.add_argument("--random-erase", default=0.0, type=float)
-    parser.add_argument("--mixup-alpha", default=0.0, type=float)
-    parser.add_argument("--cutmix-alpha", default=0.0, type=float)
+    parser.add_argument("--mixup-alpha", default=0.8, type=float)
+    parser.add_argument("--cutmix-alpha", default=1.0, type=float)
+    # For DeiT-Ti/DeiT-S, the repeated augment doesn't really matter
+    # see: https://github.com/facebookresearch/deit/issues/89
 
     parser.add_argument("--label-smoothing", default=0.1, type=float)
     parser.add_argument("--use-deterministic-algorithms", action="store_true")
-    parser.add_argument("--clip-grad-norm", default=10, type=float)
+    parser.add_argument("--clip-grad-norm", default=None, type=float)
 
     return parser
 
