@@ -8,16 +8,15 @@ import torch
 import torch.utils.data
 import torchvision
 from torch import nn
-from torch.utils.data.dataloader import default_collate
-from torchvision.transforms.functional import InterpolationMode
 
 import asdfghjkl as asdl
 from asdfghjkl import FISHER_MC, FISHER_EMP
-from torchvision_ref import presets, transforms, utils
+from trainutils.dataset import load_data, get_dataloader
+from trainutils.visionref import utils
 
 # TODO: KL-clip
 
-def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args, model_ema=None):
+def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter("lr", utils.SmoothedValue(window_size=1, fmt="{value}"))
@@ -40,12 +39,6 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, ar
         if args.clip_grad_norm is not None:
             nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
         optimizer.step()
-
-        if model_ema and i % args.model_ema_steps == 0:
-            model_ema.update_parameters(model)
-            if epoch < args.lr_warmup_epochs:
-                # Reset ema buffer to keep copying weights during warmup period
-                model_ema.n_averaged.fill_(0)
 
         acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
         batch_size = image.shape[0]
@@ -81,74 +74,6 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
     return metric_logger.acc1.global_avg
 
 
-def _get_cache_path(filepath):
-    import hashlib
-
-    h = hashlib.sha1(filepath.encode()).hexdigest()
-    cache_path = os.path.join("~", ".torch", "vision", "datasets", "imagefolder", h[:10] + ".pt")
-    cache_path = os.path.expanduser(cache_path)
-    return cache_path
-
-
-def load_data(traindir, valdir, args):
-    # Data loading code
-    print("Loading data")
-    val_resize_size, val_crop_size, train_crop_size = args.val_resize_size, args.val_crop_size, args.train_crop_size
-    interpolation = InterpolationMode(args.interpolation)
-
-    print("Loading training data")
-    st = time.time()
-    cache_path = _get_cache_path(traindir)
-    if args.cache_dataset and os.path.exists(cache_path):
-        # Attention, as the transforms are also cached!
-        print(f"Loading dataset_train from {cache_path}")
-        dataset, _ = torch.load(cache_path)
-    else:
-        auto_augment_policy = getattr(args, "auto_augment", None)
-        random_erase_prob = getattr(args, "random_erase", 0.0)
-        dataset = torchvision.datasets.ImageFolder(
-            traindir,
-            presets.ClassificationPresetTrain(
-                crop_size=train_crop_size,
-                interpolation=interpolation,
-                auto_augment_policy=auto_augment_policy,
-                random_erase_prob=random_erase_prob,
-            ),
-        )
-        if args.cache_dataset:
-            print(f"Saving dataset_train to {cache_path}")
-            utils.mkdir(os.path.dirname(cache_path))
-            utils.save_on_master((dataset, traindir), cache_path)
-    print(f"Took {time.time() - st:.2f}s")
-
-    print("Loading validation data")
-    cache_path = _get_cache_path(valdir)
-    if args.cache_dataset and os.path.exists(cache_path):
-        # Attention, as the transforms are also cached!
-        print(f"Loading dataset_test from {cache_path}")
-        dataset_test, _ = torch.load(cache_path)
-    else:
-        preprocessing = presets.ClassificationPresetEval(
-            crop_size=val_crop_size, resize_size=val_resize_size, interpolation=interpolation
-        )
-
-
-        dataset_test = torchvision.datasets.ImageFolder(
-            valdir,
-            preprocessing,
-        )
-        if args.cache_dataset:
-            print(f"Saving dataset_test to {cache_path}")
-            utils.mkdir(os.path.dirname(cache_path))
-            utils.save_on_master((dataset_test, valdir), cache_path)
-
-    print("Creating data loaders")
-    train_sampler = torch.utils.data.RandomSampler(dataset)
-    test_sampler = torch.utils.data.SequentialSampler(dataset_test)
-
-    return dataset, dataset_test, train_sampler, test_sampler
-
-
 def main(args):
     if args.output_dir:
         utils.mkdir(args.output_dir)
@@ -165,29 +90,10 @@ def main(args):
 
     train_dir = os.path.join(args.data_path, "train")
     val_dir = os.path.join(args.data_path, "val")
-    dataset, dataset_test, train_sampler, test_sampler = load_data(train_dir, val_dir, args)
 
-    collate_fn = None
+    dataset, dataset_test = load_data(train_dir, val_dir, args.val_resize_size, args.val_crop_size, args.train_crop_size, args.interpolation)
     num_classes = len(dataset.classes)
-    mixup_transforms = []
-    if args.mixup_alpha > 0.0:
-        mixup_transforms.append(transforms.RandomMixup(num_classes, p=1.0, alpha=args.mixup_alpha))
-    if args.cutmix_alpha > 0.0:
-        mixup_transforms.append(transforms.RandomCutmix(num_classes, p=1.0, alpha=args.cutmix_alpha))
-    if mixup_transforms:
-        mixupcutmix = torchvision.transforms.RandomChoice(mixup_transforms)
-        collate_fn = lambda batch: mixupcutmix(*default_collate(batch))  # noqa: E731
-    data_loader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        sampler=train_sampler,
-        num_workers=args.workers,
-        pin_memory=True,
-        collate_fn=collate_fn,
-    )
-    data_loader_test = torch.utils.data.DataLoader(
-        dataset_test, batch_size=args.batch_size, sampler=test_sampler, num_workers=args.workers, pin_memory=True
-    )
+    data_loader, data_loader_test = get_dataloader(dataset, dataset_test, args.mixup_alpha, args.cutmix_alpha, args.batch_size, args.workers)
 
     print("Creating model")
     if args.model.startswith("timm_"):
@@ -282,47 +188,19 @@ def main(args):
     else:
         lr_scheduler = main_lr_scheduler
 
-    model_ema = None
-    if args.model_ema:
-        # Decay adjustment that aims to keep the decay independent from other hyper-parameters originally proposed at:
-        # https://github.com/facebookresearch/pycls/blob/f8cd9627/pycls/core/net.py#L123
-        #
-        # total_ema_updates = (Dataset_size / n_GPUs) * epochs / (batch_size_per_gpu * EMA_steps)
-        # We consider constant = Dataset_size for a given dataset/setup and ommit it. Thus:
-        # adjust = 1 / total_ema_updates ~= n_GPUs * batch_size_per_gpu * EMA_steps / epochs
-        adjust = args.batch_size * args.model_ema_steps / args.epochs
-        alpha = 1.0 - args.model_ema_decay
-        alpha = min(1.0, alpha * adjust)
-        model_ema = utils.ExponentialMovingAverage(model, device=device, decay=1.0 - alpha)
-
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location="cpu")
-        model.load_state_dict(checkpoint["model"])
-        if not args.test_only:
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-        args.start_epoch = checkpoint["epoch"] + 1
-        if model_ema:
-            model_ema.load_state_dict(checkpoint["model_ema"])
-
     if args.test_only:
         # We disable the cudnn benchmarking because it can noticeably affect the accuracy
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-        if model_ema:
-            evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
-        else:
-            evaluate(model, criterion, data_loader_test, device=device)
+        evaluate(model, criterion, data_loader_test, device=device)
         return
 
     print("Start training")
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
-        train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args, model_ema)
+    for epoch in range(args.epochs):
+        train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, args)
         lr_scheduler.step()
         evaluate(model, criterion, data_loader_test, device=device)
-        if model_ema:
-            evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
         if args.output_dir:
             checkpoint = {
                 "model": model.state_dict(),
@@ -331,8 +209,6 @@ def main(args):
                 "epoch": epoch,
                 "args": args,
             }
-            if model_ema:
-                checkpoint["model_ema"] = model_ema.state_dict()
             utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
             utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
@@ -341,118 +217,55 @@ def main(args):
     print(f"Training time {total_time_str}")
 
 
-def get_args_parser(add_help=True):
+def get_args_parser():
 
-    parser = argparse.ArgumentParser(description="PyTorch Classification Training", add_help=add_help)
+    parser = argparse.ArgumentParser(description="PyTorch Classification Training")
 
-    parser.add_argument("--data-path", default="/datasets01/imagenet_full_size/061417/", type=str, help="dataset path")
+    parser.add_argument("--data-path", default="/root/autodl-tmp/imagenet", type=str)
     # To use a timm model, add "timm_" before the timm model name, e.g. timm_vit_tiny_patch16_224
-    parser.add_argument("--model", default="resnet18", type=str, help="model name")
-    parser.add_argument("--device", default="cuda", type=str, help="device (Use cuda or cpu Default: cuda)")
-    parser.add_argument(
-        "-b", "--batch-size", default=32, type=int, help="images per gpu, the total batch size is $NGPU x batch_size"
-    )
-    parser.add_argument("--epochs", default=90, type=int, metavar="N", help="number of total epochs to run")
-    parser.add_argument(
-        "-j", "--workers", default=6, type=int, metavar="N", help="number of data loading workers (default: 16)"
-    )
-    parser.add_argument("--opt", default="sgd", type=str, help="optimizer", choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
-    parser.add_argument("--lr", default=0.1, type=float, help="initial learning rate")
-    parser.add_argument("--momentum", default=0.9, type=float, metavar="M", help="momentum")
-    parser.add_argument(
-        "--wd",
-        "--weight-decay",
-        default=1e-4,
-        type=float,
-        metavar="W",
-        help="weight decay (default: 1e-4)",
-        dest="weight_decay",
-    )
-    parser.add_argument(
-        "--norm-weight-decay",
-        default=None,
-        type=float,
-        help="weight decay for Normalization layers (default: None, same value as --wd)",
-    )
-    parser.add_argument(
-        "--label-smoothing", default=0.0, type=float, help="label smoothing (default: 0.0)", dest="label_smoothing"
-    )
-    parser.add_argument("--mixup-alpha", default=0.0, type=float, help="mixup alpha (default: 0.0)")
-    parser.add_argument("--cutmix-alpha", default=0.0, type=float, help="cutmix alpha (default: 0.0)")
-    parser.add_argument("--lr-scheduler", default="steplr", type=str, help="the lr scheduler (default: steplr)")
-    parser.add_argument("--lr-warmup-epochs", default=0, type=int, help="the number of epochs to warmup (default: 0)")
-    parser.add_argument(
-        "--lr-warmup-method", default="constant", type=str, help="the warmup method (default: constant)"
-    )
-    parser.add_argument("--lr-warmup-decay", default=0.01, type=float, help="the decay for lr")
-    parser.add_argument("--lr-step-size", default=30, type=int, help="decrease lr every step-size epochs")
+    parser.add_argument("--model", default="timm_vit_tiny_patch16_224", type=str)
+    parser.add_argument("--pretrained", dest="pretrained", action="store_true")
+
+    parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
+    parser.add_argument("--batch-size", default=256, type=int)
+    parser.add_argument("--test-only", dest="test_only", action="store_true")
+    parser.add_argument("--epochs", default=40, type=int)
+    parser.add_argument("--workers", default=6, type=int)
+    parser.add_argument("--print-freq", default=50, type=int)
+    parser.add_argument("--output-dir", default=".", type=str)
+
+    parser.add_argument("--opt", default="kfac_mc", type=str, choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
+    parser.add_argument("--lr", default=0.01, type=float)
+    parser.add_argument("--momentum", default=0.9, type=float)
+    parser.add_argument("--weight-decay", default=5e-5, type=float)
+    parser.add_argument("--norm-weight-decay", default=None, type=float) # WD For norm layers
+    parser.add_argument("--lr-scheduler", default="multisteplr", type=str)
+    parser.add_argument("--lr-warmup-epochs", default=0, type=int)
+    parser.add_argument("--lr-warmup-method", default="linear", type=str)
+    parser.add_argument("--lr-warmup-decay", default=0.125, type=float) # First epoch lr decay
+    parser.add_argument("--lr-step-size", default=30, type=int)
     parser.add_argument('--lr-decay-epoch', nargs='+', type=int, default=[15, 25, 30])
-    parser.add_argument("--lr-gamma", default=0.1, type=float, help="decrease lr by a factor of lr-gamma")
-    parser.add_argument("--print-freq", default=50, type=int, help="print frequency")
-    parser.add_argument("--output-dir", default=".", type=str, help="path to save outputs")
-    parser.add_argument("--resume", default="", type=str, help="path of checkpoint")
-    parser.add_argument("--start-epoch", default=0, type=int, metavar="N", help="start epoch")
-    parser.add_argument(
-        "--cache-dataset",
-        dest="cache_dataset",
-        help="Cache the datasets for quicker initialization. It also serializes the transforms",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--test-only",
-        dest="test_only",
-        help="Only test the model",
-        action="store_true",
-    )
-    parser.add_argument(
-        "--pretrained",
-        dest="pretrained",
-        help="Use pre-trained models from the modelzoo",
-        action="store_true",
-    )
-    parser.add_argument("--auto-augment", default=None, type=str, help="auto augment policy (default: None)")
-    parser.add_argument("--random-erase", default=0.0, type=float, help="random erasing probability (default: 0.0)")
-
-    parser.add_argument(
-        "--model-ema", action="store_true", help="enable tracking Exponential Moving Average of model parameters"
-    )
-    parser.add_argument(
-        "--model-ema-steps",
-        type=int,
-        default=32,
-        help="the number of iterations that controls how often to update the EMA model (default: 32)",
-    )
-    parser.add_argument(
-        "--model-ema-decay",
-        type=float,
-        default=0.99998,
-        help="decay factor for Exponential Moving Average of model parameters (default: 0.99998)",
-    )
-    parser.add_argument(
-        "--use-deterministic-algorithms", action="store_true", help="Forces the use of deterministic algorithms only."
-    )
-    parser.add_argument(
-        "--interpolation", default="bilinear", type=str, help="the interpolation method (default: bilinear)"
-    )
-    parser.add_argument(
-        "--val-resize-size", default=256, type=int, help="the resize size used for validation (default: 256)"
-    )
-    parser.add_argument(
-        "--val-crop-size", default=224, type=int, help="the central crop size used for validation (default: 224)"
-    )
-    parser.add_argument(
-        "--train-crop-size", default=224, type=int, help="the random crop size used for training (default: 224)"
-    )
-    parser.add_argument("--clip-grad-norm", default=None, type=float, help="the maximum gradient norm (default None)")
-
-    parser.add_argument("--weights", default=None, type=str, help="the weights enum name to load")
-
+    parser.add_argument("--lr-gamma", default=0.1, type=float)
     # K-FAC
     parser.add_argument('--cov-update-freq', type=int, default=10)
     parser.add_argument('--inv-update-freq', type=int, default=100)
     parser.add_argument('--ema-decay', type=float, default=0.05)
     parser.add_argument('--damping', type=float, default=0.001)
     parser.add_argument('--kl-clip', type=float, default=0.001)
+
+    parser.add_argument("--interpolation", default="bilinear", type=str)
+    parser.add_argument("--val-resize-size", default=256, type=int)
+    parser.add_argument("--val-crop-size", default=224, type=int)
+    parser.add_argument("--train-crop-size", default=224, type=int)
+    parser.add_argument("--auto-augment", default=None, type=str)
+    parser.add_argument("--random-erase", default=0.0, type=float)
+    parser.add_argument("--mixup-alpha", default=0.0, type=float)
+    parser.add_argument("--cutmix-alpha", default=0.0, type=float)
+
+    parser.add_argument("--label-smoothing", default=0.1, type=float)
+    parser.add_argument("--use-deterministic-algorithms", action="store_true")
+    parser.add_argument("--clip-grad-norm", default=10, type=float)
+
     return parser
 
 
