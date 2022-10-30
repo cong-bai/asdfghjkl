@@ -140,3 +140,4 @@ wandb
 
 .vscode
 data
+*.out
