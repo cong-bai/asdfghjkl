@@ -15,6 +15,8 @@ from trainutils.dataset import load_data
 from trainutils.visionref import utils
 
 # TODO: KL-clip
+# TODO: Fix long lines
+# pylint: disable=line-too-long
 
 def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mixup_fn, args):
     model.train()
@@ -45,7 +47,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mi
             nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad_norm)
         optimizer.step()
 
-        acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = utils.accuracy(output, target, topk=(1, 5)) # pylint: disable=W0632
         batch_size = image.shape[0]
         metric_logger.update(loss=loss.item(), lr=optimizer.param_groups[0]["lr"])
         metric_logger.meters["acc1"].update(acc1.item(), n=batch_size)
@@ -66,7 +68,7 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
             output = model(image)
             loss = criterion(output, target)
 
-            acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+            acc1, acc5 = utils.accuracy(output, target, topk=(1, 5)) # pylint: disable=W0632
             # FIXME need to take into account that the datasets
             # could have been padded in distributed setup
             batch_size = image.shape[0]
