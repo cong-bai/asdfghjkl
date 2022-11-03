@@ -8,6 +8,7 @@ import timm
 import torch
 import torch.utils.data
 import torchvision
+from ray import tune
 from torch import nn
 
 import asdfghjkl as asdl
@@ -29,6 +30,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mi
     for _, (image, target) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         start_time = time.time()
         image, target = image.to(device), target.to(device)
+        # TODO: This should be fixed when K-FAC updates
         loss_func = torch.nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
         if mixup_fn:
             image = image[:image.shape[0] // 2 * 2, :, :, :] # In mixup_fn, batch size must be even
@@ -150,7 +152,7 @@ def main(args):
             lr=args.lr,
             momentum=args.momentum,
             weight_decay=args.weight_decay,
-            nesterov="nesterov" in opt_name,
+            nesterov=args.nesterov,
         )
 
     if opt_name == "kfac_mc":
@@ -181,7 +183,7 @@ def main(args):
         main_lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, args.lr_decay_epoch, gamma=args.lr_gamma)
     elif args.lr_scheduler == "cosineannealinglr":
         main_lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=args.epochs - args.lr_warmup_epochs
+            optimizer, T_max=args.epochs - args.lr_warmup_epochs, eta_min=args.lr * args.lr_eta_min
         )
     elif args.lr_scheduler == "exponentiallr":
         main_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=args.lr_gamma)
@@ -219,20 +221,23 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
+    acc_list = []
     for epoch in range(args.epochs):
         train_one_epoch(model, optimizer, grad_maker, data_loader, device, epoch, mixup_fn, args)
         lr_scheduler.step()
-        evaluate(model, criterion, data_loader_test, device=device)
-        if args.output_dir:
-            checkpoint = {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "lr_scheduler": lr_scheduler.state_dict(),
-                "epoch": epoch,
-                "args": args,
-            }
-            # utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
-            # utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
+        acc_list.append(evaluate(model, criterion, data_loader_test, device=device))
+        if args.ray:
+            tune.report(mean_accuracy=max(acc_list))
+        # if args.output_dir:
+        #     checkpoint = {
+        #         "model": model.state_dict(),
+        #         "optimizer": optimizer.state_dict(),
+        #         "lr_scheduler": lr_scheduler.state_dict(),
+        #         "epoch": epoch,
+        #         "args": args,
+        #     }
+        #     utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+        #     utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -248,7 +253,9 @@ def get_args_parser():
     parser.add_argument("--data-path", default="data", type=str)
     # To use a timm model, add "timm_" before the timm model name, e.g. timm_deit_tiny_patch16_224
     parser.add_argument("--model", default="timm_deit_tiny_patch16_224", type=str)
-    parser.add_argument("--pretrained", dest="pretrained", action="store_true")
+    parser.add_argument("--pretrained", default=True, dest="pretrained", action="store_true")
+    parser.add_argument("--ray", action="store_true")
+    parser.add_argument("--use-deterministic-algorithms", action="store_true")
 
     parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
     parser.add_argument("--batch-size", default=768, type=int)
@@ -270,6 +277,8 @@ def get_args_parser():
     parser.add_argument("--lr-step-size", default=None, type=int)
     parser.add_argument('--lr-decay-epoch', nargs='+', type=int, default=[15, 25, 30])
     parser.add_argument("--lr-gamma", default=None, type=float)
+    parser.add_argument("--lr-eta-min", default=0.0, type=float)
+    parser.add_argument("--clip-grad-norm", default=1, type=float)
     # K-FAC
     parser.add_argument('--cov-update-freq', type=int, default=10)
     parser.add_argument('--inv-update-freq', type=int, default=100)
@@ -285,13 +294,9 @@ def get_args_parser():
     parser.add_argument("--random-erase", default=0.0, type=float)
     parser.add_argument("--mixup-alpha", default=0.8, type=float)
     parser.add_argument("--cutmix-alpha", default=1.0, type=float)
+    parser.add_argument("--label-smoothing", default=0.0, type=float)
     # For DeiT-Ti/DeiT-S, the repeated augment doesn't really matter
     # see: https://github.com/facebookresearch/deit/issues/89
-
-    parser.add_argument("--label-smoothing", default=0.1, type=float)
-    parser.add_argument("--use-deterministic-algorithms", action="store_true")
-    parser.add_argument("--clip-grad-norm", default=None, type=float)
-
     return parser
 
 
