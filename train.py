@@ -252,26 +252,26 @@ def get_args_parser():
     # When using Ray, it should be an absolute path
     parser.add_argument("--data-path", default="data", type=str)
     # To use a timm model, add "timm_" before the timm model name, e.g. timm_deit_tiny_patch16_224
-    parser.add_argument("--model", default="timm_deit_tiny_patch16_224", type=str)
+    parser.add_argument("--model", default="timm_vit_tiny_patch16_224", type=str)
     parser.add_argument("--pretrained", default=True, dest="pretrained", action="store_true")
     parser.add_argument("--ray", action="store_true")
     parser.add_argument("--use-deterministic-algorithms", action="store_true")
 
     parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
-    parser.add_argument("--batch-size", default=768, type=int)
+    parser.add_argument("--batch-size", default=128, type=int)
     parser.add_argument("--test-only", dest="test_only", action="store_true")
-    parser.add_argument("--epochs", default=1000, type=int)
-    parser.add_argument("--workers", default=6, type=int)
+    parser.add_argument("--epochs", default=20, type=int)
+    parser.add_argument("--workers", default=4, type=int)
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--output-dir", default=".", type=str)
     parser.add_argument("--ignore-warning", action="store_true")
 
     parser.add_argument("--opt", default="sgd", type=str, choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
     parser.add_argument("--lr", default=0.01, type=float)
-    parser.add_argument("--momentum", default=0, type=float)
-    parser.add_argument("--weight-decay", default=1e-4, type=float)
+    parser.add_argument("--momentum", default=0.9, type=float)
+    parser.add_argument("--weight-decay", default=0, type=float)
     parser.add_argument("--lr-scheduler", default="cosineannealinglr", type=str)
-    parser.add_argument("--lr-warmup-epochs", default=5, type=int)
+    parser.add_argument("--lr-warmup-epochs", default=0, type=int)
     parser.add_argument("--lr-warmup-method", default="linear", type=str)
     parser.add_argument("--lr-warmup-decay", default=0.1, type=float) # First epoch lr decay
     parser.add_argument("--lr-step-size", default=None, type=int)
