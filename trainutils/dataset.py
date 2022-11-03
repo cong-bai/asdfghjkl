@@ -3,7 +3,7 @@ from timm.data.transforms_factory import create_transform
 
 
 def load_data(dataset, traindir, valdir, val_input_size, val_crop_pct, train_input_size, interpolation,
-              auto_augment_policy, random_erase_prob):
+              auto_augment_policy, random_erase_prob, dataset_root="data"):
 
     train_transform = create_transform(
         train_input_size,
@@ -20,8 +20,8 @@ def load_data(dataset, traindir, valdir, val_input_size, val_crop_pct, train_inp
     )
 
     if dataset == "cifar10":
-        dataset = torchvision.datasets.CIFAR10(root="data", transform=train_transform, download=True)
-        dataset_test = torchvision.datasets.CIFAR10(root="data", train=False, transform=val_transform)
+        dataset = torchvision.datasets.CIFAR10(root=dataset_root, transform=train_transform, download=True)
+        dataset_test = torchvision.datasets.CIFAR10(root=dataset_root, train=False, transform=val_transform)
     elif dataset == "imagenet":
         dataset = torchvision.datasets.ImageFolder(traindir, transform=train_transform)
         dataset_test = torchvision.datasets.ImageFolder(valdir, transform=val_transform)

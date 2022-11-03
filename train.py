@@ -96,7 +96,7 @@ def main(args):
     train_dir = os.path.join(args.data_path, "train")
     val_dir = os.path.join(args.data_path, "val")
 
-    dataset, dataset_test = load_data(args.dataset, train_dir, val_dir, args.val_input_size, args.val_crop_pct, args.train_input_size, args.interpolation, args.auto_augment, args.random_erase)
+    dataset, dataset_test = load_data(args.dataset, train_dir, val_dir, args.val_input_size, args.val_crop_pct, args.train_input_size, args.interpolation, args.auto_augment, args.random_erase, args.data_path)
     num_classes = len(dataset.classes)
     persist_dataset = args.dataset == "cifar10"
     data_loader = torch.utils.data.DataLoader(
@@ -131,13 +131,8 @@ def main(args):
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
-    if args.norm_weight_decay is None:
-        parameters = model.parameters()
-    else:
-        param_groups = torchvision.ops._utils.split_normalization_params(model)
-        wd_groups = [args.norm_weight_decay, args.weight_decay]
-        parameters = [{"params": p, "weight_decay": w} for p, w in zip(param_groups, wd_groups) if p]
-
+    
+    parameters = model.parameters()
     opt_name = args.opt.lower()
     if opt_name == "rmsprop":
         optimizer = torch.optim.RMSprop(
@@ -245,7 +240,8 @@ def get_args_parser():
     parser = argparse.ArgumentParser(description="PyTorch Classification Training")
 
     parser.add_argument("--dataset", default="cifar10", type=str)
-    parser.add_argument("--data-path", default="/root/autodl-tmp/imagenet", type=str)
+    # When using Ray, it should be an absolute path
+    parser.add_argument("--data-path", default="data", type=str)
     # To use a timm model, add "timm_" before the timm model name, e.g. timm_deit_tiny_patch16_224
     parser.add_argument("--model", default="timm_deit_tiny_patch16_224", type=str)
     parser.add_argument("--pretrained", dest="pretrained", action="store_true")
@@ -262,7 +258,6 @@ def get_args_parser():
     parser.add_argument("--lr", default=0.01, type=float)
     parser.add_argument("--momentum", default=0, type=float)
     parser.add_argument("--weight-decay", default=1e-4, type=float)
-    parser.add_argument("--norm-weight-decay", default=None, type=float) # WD For norm layers
     parser.add_argument("--lr-scheduler", default="cosineannealinglr", type=str)
     parser.add_argument("--lr-warmup-epochs", default=5, type=int)
     parser.add_argument("--lr-warmup-method", default="linear", type=str)
