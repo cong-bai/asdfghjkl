@@ -2,6 +2,7 @@ import argparse
 import datetime
 import os
 import time
+import warnings
 
 import timm
 import torch
@@ -82,6 +83,8 @@ def evaluate(model, criterion, data_loader, device, print_freq=100, log_suffix="
 
 
 def main(args):
+    if args.ignore_warning:
+        warnings.filterwarnings("ignore")
     if args.output_dir:
         utils.mkdir(args.output_dir)
 
@@ -133,7 +136,6 @@ def main(args):
 
     criterion = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
-    
     parameters = model.parameters()
     opt_name = args.opt.lower()
     if opt_name == "rmsprop":
@@ -255,6 +257,7 @@ def get_args_parser():
     parser.add_argument("--workers", default=6, type=int)
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--output-dir", default=".", type=str)
+    parser.add_argument("--ignore-warning", action="store_true")
 
     parser.add_argument("--opt", default="sgd", type=str, choices=["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"])
     parser.add_argument("--lr", default=0.01, type=float)
