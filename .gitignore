@@ -141,3 +141,4 @@ wandb
 .vscode
 data
 *.out
+archive

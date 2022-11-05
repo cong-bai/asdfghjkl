@@ -239,8 +239,7 @@ def main(args):
         #     utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
         #     utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    total_time_str = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print(f"Training time {total_time_str}")
 
 
