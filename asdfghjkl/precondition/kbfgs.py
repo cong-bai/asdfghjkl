@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from ..core import extend, module_wise_assignments
-from ..operations import OP_MEAN_INPUTS, OP_MEAN_OUTPUTS, OP_MEAN_OUTGRADS,\
+from ..operations import OP_MEAN_INPUTS, OP_SPATIAL_MEAN_OUTPUTS, OP_SPATIAL_MEAN_OUTGRADS,\
     OP_OUT_SPATIAL_SIZE, OP_COV_KRON, OP_BFGS_KRON_S_AS, OperationContext
 from ..utils import cholesky_inv
 from ..symmatrix import SymMatrix
@@ -62,10 +62,10 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
         model = self.model
         config = self.config
         if config.minibatch_hessian_action and self._A_inv_exists:
-            op_names = (OP_BFGS_KRON_S_AS, OP_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE)
+            op_names = (OP_BFGS_KRON_S_AS, OP_SPATIAL_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE)
         else:
-            op_names = (OP_COV_KRON, OP_MEAN_INPUTS, OP_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE)
-        op_names += (OP_MEAN_OUTGRADS,)
+            op_names = (OP_COV_KRON, OP_MEAN_INPUTS, OP_SPATIAL_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE)
+        op_names += (OP_SPATIAL_MEAN_OUTGRADS,)
         with extend(model, *op_names, ignore_modules=config.ignore_modules) as cxt:
             rst = self.forward()
             self._update_A_inv(cxt)
@@ -78,7 +78,7 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
     def post_preconditioner_update(self):
         self._restore_last_model_args_kwargs()
         # another forward and backward using the previous model_args, kwargs
-        op_names = (OP_MEAN_OUTPUTS, OP_MEAN_OUTGRADS, OP_OUT_SPATIAL_SIZE)
+        op_names = (OP_SPATIAL_MEAN_OUTPUTS, OP_SPATIAL_MEAN_OUTGRADS, OP_OUT_SPATIAL_SIZE)
         kwargs = dict(ignore_modules=self.config.ignore_modules)
         with extend(self.model, *op_names, **kwargs) as cxt:
             self.forward()
@@ -133,17 +133,17 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
         config = self.config
         for module in self.modules:
             if is_forward:
-                setattr(module, config.mean_outputs_attr, cxt.mean_out_data(module))
+                setattr(module, config.mean_outputs_attr, cxt.spatial_mean_out_data(module))
             else:
-                setattr(module, config.mean_outgrads_attr, cxt.mean_out_grads(module))
+                setattr(module, config.mean_outgrads_attr, cxt.spatial_mean_out_grads(module))
 
     def _update_B_inv(self, cxt: OperationContext):
         config = self.config
         for module in self.modules:
             damping = self.get_damping(cxt, module, is_A=False)
             bfgs = getattr(module, config.bfgs_attr)
-            s = cxt.mean_out_grads(module) - getattr(module, config.mean_outputs_attr)
-            y = cxt.mean_out_grads(module) - getattr(module, config.mean_outgrads_attr)
+            s = cxt.spatial_mean_out_data(module) - getattr(module, config.mean_outputs_attr)
+            y = cxt.spatial_mean_out_grads(module) - getattr(module, config.mean_outgrads_attr)
             if bfgs.kron.B_inv is None:
                 bfgs.kron.B_inv = torch.eye(s.shape[0], device=s.device)
             H = bfgs.kron.B_inv
