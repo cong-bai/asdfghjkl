@@ -73,7 +73,7 @@ def evaluate(model, criterion, data_loader, device="cuda"):
         output = torch.cat(output_list)
         loss = criterion(output, target)  # may have loss_smoothing
         acc = torch.sum(torch.argmax(output, dim=1) == target) / len(target) * 100
-    return loss, acc
+    return loss, acc.cpu()
 
 
 def main(args):
@@ -229,6 +229,8 @@ def main(args):
             log = {"epoch": epoch, "val_acc": acc, "val_loss": loss}
             wandb.log(log)
 
+    if args.wandb:
+        wandb.finish()
     total_time_str = str(datetime.timedelta(seconds=int(time.time() - start_time)))
     print(f"Training time {total_time_str}")
 
