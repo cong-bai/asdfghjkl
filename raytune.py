@@ -56,5 +56,5 @@ tuner = tune.Tuner(
     # run_config=RunConfig(verbose=1),
     param_space=search_space,
 )
+
 results = tuner.fit()
-dfs = {result.log_dir: result.metrics_dataframe for result in results}
