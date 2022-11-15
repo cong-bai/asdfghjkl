@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 
 from ray import tune
@@ -27,11 +28,16 @@ def train(config):
     args.pretrained = True
     args.epochs = 20
     args.ignore_warning = True
-    args.data_path = "/home/cong/codes/asdl_new/asdfghjkl/data"
+    args.data_path = os.path.join(os.getenv("HINADORI_LOCAL_SCRATCH"), "cifar10")
     for k, v in config.items():
         setattr(args, k, v)
     with HiddenPrints():
         main(args)
+
+shutil.copytree(
+    "/mnt/nfs/datasets/cifar-10-batches-py",
+    os.path.join(os.getenv("HINADORI_LOCAL_SCRATCH"), "cifar10", "cifar-10-batches-py")
+)
 
 search_space = {
     "lr": tune.loguniform(3e-3, 1e-1),
