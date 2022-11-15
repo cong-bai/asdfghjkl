@@ -264,7 +264,7 @@ def get_args_parser():
     parser.add_argument("--wandb-tag", default=None, type=str)
 
     parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
-    parser.add_argument("--batch-size", default=128, type=int)
+    parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--epochs", default=20, type=int)
     parser.add_argument("--workers", default=4, type=int)
     parser.add_argument("--print-freq", default=50, type=int)
@@ -272,25 +272,25 @@ def get_args_parser():
 
     opt_choices = ["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp", "shampoo"]
     parser.add_argument("--opt", default="sgd", type=str, choices=opt_choices)
-    parser.add_argument("--lr", default=0.01, type=float)
-    parser.add_argument("--momentum", default=0.9, type=float)
+    parser.add_argument("--lr", default=0.1, type=float)
+    parser.add_argument("--momentum", default=0, type=float)
     parser.add_argument("--nesterov", default=True, action="store_true")
-    parser.add_argument("--weight-decay", default=0, type=float)
+    parser.add_argument("--weight-decay", default=1e-6, type=float)
     parser.add_argument("--lr-scheduler", default="cosineannealinglr", type=str)
-    parser.add_argument("--lr-eta-min", default=0, type=float)
+    parser.add_argument("--lr-eta-min", default=0.001, type=float)
     parser.add_argument("--lr-step-size", type=int)
     parser.add_argument("--lr-decay-epoch", nargs="+", type=int, default=[15, 25, 30])
     parser.add_argument("--lr-gamma", type=float)
     parser.add_argument("--lr-warmup-epochs", default=0, type=int)
     parser.add_argument("--lr-warmup-method", default="linear", type=str)
     parser.add_argument("--lr-warmup-decay", default=0.1, type=float)  # First epoch lr decay
-    parser.add_argument("--clip-grad-norm", default=1, type=float)
+    parser.add_argument("--clip-grad-norm", default=10, type=float)
     # K-FAC
     parser.add_argument("--cov-update-freq", type=int, default=10)
     parser.add_argument("--inv-update-freq", type=int, default=100)
     parser.add_argument("--ema-decay", type=float, default=0.05)
-    parser.add_argument("--damping", type=float, default=0.001)
-    parser.add_argument("--kl-clip", type=float, default=0.001)
+    parser.add_argument("--damping", type=float, default=1e-7)
+    # parser.add_argument("--kl-clip", type=float, default=0.001)
 
     parser.add_argument("--interpolation", default="bilinear", type=str)
     parser.add_argument("--val-input-size", default=224, type=int)
