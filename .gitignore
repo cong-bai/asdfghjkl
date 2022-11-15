@@ -142,3 +142,4 @@ wandb
 data
 *.out
 archive
+job.sh
