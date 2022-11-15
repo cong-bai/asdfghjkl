@@ -140,7 +140,7 @@ def main(args):
                                   weight_decay=args.weight_decay, eps=0.0316, alpha=0.9)
     elif opt_name == "adamw":
         optimizer = optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
-    elif opt_name in ("sgd", "kfac_mc", "kfac_emp"):
+    elif opt_name in ("sgd", "kfac_mc", "kfac_emp", "shampoo"):
         optimizer = optim.SGD(parameters, lr=args.lr, momentum=args.momentum,
                               weight_decay=args.weight_decay, nesterov=args.nesterov)
 
@@ -166,6 +166,14 @@ def main(args):
             ema_decay=args.ema_decay,
         )
         grad_maker = asdl.KfacGradientMaker(model, config, swift=False)
+    elif opt_name == "shampoo":
+        config = asdl.ShampooGradientConfig(
+            curvature_upd_interval=args.cov_update_freq,
+            preconditioner_upd_interval=args.inv_update_freq,
+            damping=args.damping,
+            ema_decay=args.ema_decay
+        )
+        grad_maker = asdl.ShampooGradientMaker(model, config)
     else:
         grad_maker = asdl.GradientMaker(model)
 
@@ -259,7 +267,7 @@ def get_args_parser():
     parser.add_argument("--print-freq", default=50, type=int)
     parser.add_argument("--ignore-warning", action="store_true")
 
-    opt_choices = ["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp"]
+    opt_choices = ["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp", "shampoo"]
     parser.add_argument("--opt", default="sgd", type=str, choices=opt_choices)
     parser.add_argument("--lr", default=0.01, type=float)
     parser.add_argument("--momentum", default=0.9, type=float)
