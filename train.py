@@ -83,7 +83,9 @@ def main(args):
     if args.ignore_warning:
         warnings.filterwarnings("ignore")
     if args.wandb:
-        wandb.init(mode=args.wandb_mode, project=args.wandb_project, config=args)
+        wandb.init(
+            mode=args.wandb_mode, project=args.wandb_project, tags=args.wandb_tag, config=args
+        )
     device = torch.device(args.device)
     if args.use_deterministic_algorithms:
         torch.backends.cudnn.benchmark = False
@@ -259,6 +261,7 @@ def get_args_parser():
     parser.add_argument("--wandb", action="store_true")
     parser.add_argument("--wandb-mode", type=str)
     parser.add_argument("--wandb-project", type=str)
+    parser.add_argument("--wandb-tag", default=None, type=str)
 
     parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
     parser.add_argument("--batch-size", default=128, type=int)
