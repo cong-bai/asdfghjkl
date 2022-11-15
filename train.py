@@ -42,7 +42,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, 
         else:
             output, loss = grad_maker.forward_and_backward()
         if clip_grad_norm:
-            nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            norm = nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
         optimizer.step()
 
         with torch.no_grad():
@@ -51,7 +51,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, 
             print(f"[{i}/{len(data_loader)}]\t loss: {loss:.4f}\t acc: {acc:.3f}%\t"
                   f"time: {time.time() - end_time:.3f}\t data_time: {start_time - end_time:.3f}")
         if use_wandb:
-            log = {"loss": loss, "lr": optimizer.param_groups[0]["lr"], "acc": acc,
+            log = {"loss": loss, "lr": optimizer.param_groups[0]["lr"], "acc": acc, "norm": norm,
                    "total_time": time.time() - end_time, "data_time": start_time - end_time}
             wandb.log(log)
 
