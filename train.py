@@ -10,6 +10,7 @@ import wandb
 from ray import tune
 from timm.data.transforms_factory import create_transform
 from torch import nn, optim
+from torch.linalg import vector_norm
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10, ImageFolder
 
@@ -18,10 +19,18 @@ from asdfghjkl import FISHER_MC, FISHER_EMP
 
 # TODO: KL-clip
 
+def get_grad_vec(model):
+    grad_list = [
+        torch.clone(p.grad.reshape(-1)).detach() for p in model.parameters() if p.grad is not None
+    ]
+    return torch.cat(grad_list)
+
+
 def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, print_freq=10,
                     device="cuda", mixup_fn=None, label_smoothing=0, clip_grad_norm=0):
     model.train()
     end_time = time.time()
+    cos_sim = 0
 
     for i, (image, target) in enumerate(data_loader):
         start_time = time.time()
@@ -45,13 +54,20 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, 
             norm = nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
         optimizer.step()
 
+        grad_vec = get_grad_vec(model)
+        grad_norm = vector_norm(grad_vec)
+        if i:
+            cos_sim = torch.dot(prev_grad_vec, grad_vec) / prev_grad_norm / grad_norm
+        prev_grad_vec, prev_grad_norm = grad_vec, grad_norm
+
         with torch.no_grad():
             acc = torch.sum(torch.argmax(output, dim=1) == target) / len(target) * 100
         if i % print_freq == 0:
             print(f"[{i}/{len(data_loader)}]\t loss: {loss:.4f}\t acc: {acc:.3f}%\t"
                   f"time: {time.time() - end_time:.3f}\t data_time: {start_time - end_time:.3f}")
         if use_wandb:
-            log = {"loss": loss, "lr": optimizer.param_groups[0]["lr"], "acc": acc, "norm": norm,
+            log = {"loss": loss, "lr": optimizer.param_groups[0]["lr"], "acc": acc,
+                   "norm": norm, "cos_sim": cos_sim,
                    "total_time": time.time() - end_time, "data_time": start_time - end_time}
             wandb.log(log)
 
