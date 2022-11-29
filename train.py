@@ -289,9 +289,9 @@ def get_args_parser():
     opt_choices = ["sgd", "rmsprop", "adamw", "kfac_mc", "kfac_emp", "shampoo"]
     parser.add_argument("--opt", default="sgd", type=str, choices=opt_choices)
     parser.add_argument("--lr", default=0.1, type=float)
-    parser.add_argument("--momentum", default=0, type=float)
+    parser.add_argument("--momentum", default=0.9, type=float)
     parser.add_argument("--nesterov", default=True, action="store_true")
-    parser.add_argument("--weight-decay", default=1e-6, type=float)
+    parser.add_argument("--weight-decay", default=1e-5, type=float)
     parser.add_argument("--lr-scheduler", default="cosineannealinglr", type=str)
     parser.add_argument("--lr-eta-min", default=0.001, type=float)
     parser.add_argument("--lr-step-size", type=int)
