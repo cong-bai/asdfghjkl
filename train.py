@@ -38,7 +38,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, 
         # TODO: This should be fixed when K-FAC updates
         loss_func = nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         if mixup_fn:
-            image = image[:image.shape[0] // 2 * 2, :, :, :]  # In mixup_fn, batch size must be even
+            image = image[:image.shape[0] // 2 * 2, :, :, :] # In mixup_fn, batch size must be even
             target = target[:target.shape[0] // 2 * 2]
             image, target = mixup_fn(image, target)
             loss_func = nn.CrossEntropyLoss()
@@ -110,7 +110,7 @@ def main(args):
         torch.backends.cudnn.benchmark = True
 
     # Data
-    train_transform = create_transform(args.train_input_size, is_training=True,     
+    train_transform = create_transform(args.train_input_size, is_training=True,
                                        interpolation=args.interpolation,
                                        auto_augment=args.auto_augment, re_prob=args.random_erase)
     val_transform = create_transform(args.val_input_size, interpolation=args.interpolation,
@@ -243,7 +243,7 @@ def main(args):
     start_time = time.time()
     acc_list = []
     for epoch in range(args.epochs):
-        train_one_epoch(model, optimizer, grad_maker, data_loader, args.wandb, args.print_freq, 
+        train_one_epoch(model, optimizer, grad_maker, data_loader, args.wandb, args.print_freq,
                         device, mixup_fn, args.label_smoothing, args.clip_grad_norm)
         lr_scheduler.step()
         loss, acc = evaluate(model, criterion, data_loader_test, device=device)
@@ -279,7 +279,7 @@ def get_args_parser():
     parser.add_argument("--wandb-project", type=str)
     parser.add_argument("--wandb-tag", default=None, type=str)
 
-    parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu"])
+    parser.add_argument("--device", default="cuda", type=str, choices=["cuda", "cpu", "mps"])
     parser.add_argument("--batch-size", default=256, type=int)
     parser.add_argument("--epochs", default=20, type=int)
     parser.add_argument("--workers", default=4, type=int)
