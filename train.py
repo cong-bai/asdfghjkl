@@ -10,7 +10,6 @@ import wandb
 from ray import tune
 from timm.data.transforms_factory import create_transform
 from torch import nn, optim
-from torch.linalg import vector_norm
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10, ImageFolder
 
@@ -55,10 +54,9 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, 
         optimizer.step()
 
         grad_vec = get_grad_vec(model)
-        grad_norm = vector_norm(grad_vec)
         if i:
-            cos_sim = torch.dot(prev_grad_vec, grad_vec) / prev_grad_norm / grad_norm
-        prev_grad_vec, prev_grad_norm = grad_vec, grad_norm
+            cos_sim = torch.dot(prev_grad_vec, grad_vec) / prev_grad_vec.norm() / grad_vec.norm()
+        prev_grad_vec = grad_vec
 
         with torch.no_grad():
             acc = torch.sum(torch.argmax(output, dim=1) == target) / len(target) * 100
