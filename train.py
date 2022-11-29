@@ -13,8 +13,8 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10, ImageFolder
 
-import asdfghjkl as asdl
-from asdfghjkl import FISHER_MC, FISHER_EMP
+import asdl
+from asdl import FISHER_MC, FISHER_EMP
 
 # TODO: KL-clip
 
