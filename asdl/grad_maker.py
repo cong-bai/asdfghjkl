@@ -7,6 +7,8 @@ from torch import Tensor
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .utils import has_reduction
+
 try:
     import functorch as ft
     _is_functorch_available = True
@@ -81,13 +83,17 @@ class DummyObject:
 @dataclass
 class VmapInfo:
     def __init__(self, *args, **kwargs):
-        assert [v is None or isinstance(v, int) for v in args]
-        assert [v is None or isinstance(v, int) for v in kwargs.values()]
+        if any(v is not None and not isinstance(v, int) for v in args):
+            raise TypeError('Every argument in args has to be int or None.')
+        if any(v is not None and not isinstance(v, int) for v in kwargs.values()):
+            raise TypeError('Every argument in kwargs has to be int or None.')
         self.args_batch_dims: Tuple[int] = args
         self.kwargs_batch_dims: Dict[str, int] = kwargs
 
 
 class GradientMaker:
+    _loss_reduction = None
+
     def __init__(self, model: nn.Module):
         self.model = model
         self._model_fn = None
@@ -122,13 +128,13 @@ class GradientMaker:
         self._loss_vmap_info = VmapInfo(*args, **kwargs)
 
     def setup_loss_repr(self, dummy_loss: DummyObject):
-        assert isinstance(dummy_loss, DummyObject), \
-            f'dummy_loss has to be an {DummyObject}, not {type(dummy_loss)}.'
+        if not isinstance(dummy_loss, DummyObject):
+            raise TypeError(f'dummy_loss has to be an {DummyObject}, not {type(dummy_loss)}.')
         self._dummy_loss = dummy_loss
 
     def setup_logits_repr(self, dummy_logits: DummyObject):
-        assert isinstance(dummy_logits, DummyObject), \
-            f'dummy_loss has to be an {DummyObject}, not {type(dummy_logits)}.'
+        if not isinstance(dummy_logits, DummyObject):
+            raise TypeError(f'dummy_loss has to be an {DummyObject}, not {type(dummy_loss)}.')
         self._dummy_logits = dummy_logits
 
     @property
@@ -140,37 +146,35 @@ class GradientMaker:
         return self._loss
 
     def call_model(self) -> Any:
-        assert self._model_fn is not None, \
-            'model_fn is not set. Call setup_model_call() ' \
-            'before calling forward_and_backward().'
+        if self._model_fn is None:
+            raise ValueError('model_fn is not set. Call setup_model_call() before calling forward_and_backward().')
         self._model_output = self._model_fn(*self._model_args, **self._model_kwargs)
         self._logits = self._dummy_logits.eval(self._model_output)
         return self._model_output
 
     def call_loss(self) -> Tensor:
         if self._loss_fn is None:
-            assert self._dummy_loss is not None, 'Neither loss_fn nor loss_repr is not set. ' \
-                                                 'Call setup_loss_call() or setup_loss_repr() ' \
-                                                 'before calling forward_and_backward().'
+            if self._dummy_loss is None:
+                raise ValueError('Neither loss_fn nor loss_repr is not set. '
+                                 'Call setup_loss_call() or setup_loss_repr() before calling forward_and_backward().')
             self._loss = self._dummy_loss.eval(self._model_output)
         else:
             self._loss = self._call_loss_fn()
         return self._loss
 
-    def forward(self) -> Union[Tuple[Any, Tensor], Any]:
+    def forward(self):
         self.call_model()
         self.call_loss()
-        return self._model_output, self._loss
 
     def backward(self):
         self._loss.backward()
 
-    def forward_and_backward(self) -> Union[Tuple[Any, Tensor], Any]:
+    def forward_and_backward(self):
         # Performs a forward pass (model and loss evaluations) and a backward pass (gradient calculation).
         # A child class should override this function.
-        rst = self.forward()
+        self.forward()
         self.backward()
-        return rst
+        return self._model_output, self._loss
 
     def delegate_forward_and_backward(self, other, *args, **kwargs):
         other.setup_model_call(self._model_fn, *self._model_args, **self._model_kwargs)
@@ -179,10 +183,10 @@ class GradientMaker:
         else:
             other.setup_loss_call(self._loss_fn, *self._loss_fn_args, **self._loss_fn_kwargs)
         other.setup_logits_repr(self._dummy_logits)
-        rst = other.forward_and_backward(*args, **kwargs)
+        other.forward_and_backward(*args, **kwargs)
         self._model_output = other.model_output
         self._loss = other.loss
-        return rst
+        return self._model_output, self._loss
 
     def _get_mapped_loss_fn_args_kwargs(self):
         def mapping(value):
@@ -198,16 +202,33 @@ class GradientMaker:
         return args, kwargs
 
     def _call_loss_fn(self) -> Tensor:
-        args, kwargs = self._get_mapped_loss_fn_args_kwargs()
-        return self._loss_fn(*args, **kwargs)
+        def call():
+            args, kwargs = self._get_mapped_loss_fn_args_kwargs()
+            return self._loss_fn(*args, **kwargs)
+
+        reduction = self._loss_reduction
+        if reduction is not None:
+            if not has_reduction(self._loss_fn):
+                raise AttributeError('loss_fn has to have "reduction" option')
+            if isinstance(self._loss_fn, nn.Module):
+                original_reduction = self._loss_fn.reduction
+                self._loss_fn.reduction = reduction
+                rst = call()
+                self._loss_fn.reduction = original_reduction
+                return rst
+            else:
+                self._loss_fn_kwargs['reduction'] = reduction
+                return call()
+        return call()
 
     def _get_stateless_model_fn(self):
-        assert _is_functorch_available, \
-            'functorch is not available. Follow the installation guide in https://pytorch.org/functorch/stable/.'
-        assert self._model_fn is not None, \
-            'model_fn is not set. Call setup_model_call().'
-        assert isinstance(self._model_fn, nn.Module), \
-            'model_fn has to be an object of torch.nn.Module.'
+        if not _is_functorch_available:
+            raise EnvironmentError('functorch is not available. Follow the installation guide '
+                                   'in https://pytorch.org/functorch/stable/.')
+        if self._model_fn is None:
+            raise ValueError('model_fn is not set. Call setup_model_call().')
+        if not isinstance(self._model_fn, nn.Module):
+            raise TypeError('model_fn has to be an object of torch.nn.Module.')
         model_fn, params, buffers = ft.make_functional_with_buffers(self._model_fn)
         return model_fn, params, buffers
 
@@ -229,17 +250,16 @@ class GradientMaker:
         return logit_fn_params_only, params
 
     def _get_stateless_model_loss_fn_params_only(self, return_output=False):
+        if self._loss_reduction == 'none':
+            raise ValueError('Stateless loss function is not available when _loss_reduction == "none".')
+
         model_fn_params_only, params = self._get_stateless_model_fn_params_only()
 
         def model_loss_fn_params_only(params):
             self._model_output = model_fn_params_only(params)
             self.call_loss()
-            if self._loss_fn is None:
-                rst = self._model_output
-            else:
-                rst = self._model_output, self._loss
             if return_output:
-                return self._loss, rst
+                return self._loss, self._model_output
             else:
                 return self._loss
 
@@ -251,7 +271,8 @@ class GradientMaker:
         return grad_fn, params
 
     def _get_random_tangents(self):
-        assert isinstance(self._model_fn, nn.Module)
+        if not isinstance(self._model_fn, nn.Module):
+            raise TypeError(f'_model_fn has to be {nn.Module}. Got {type(self._model_fn)}.')
         return tuple([torch.randn_like(p) for p in self._model_fn.parameters()])
 
     @torch.no_grad()
@@ -281,9 +302,15 @@ class GradientMaker:
                     else:
                         batch_dims += (None,)
             else:
-                assert len(ref_args) == len(vmap_info.args_batch_dims)
-                assert len(ref_kwargs) == len(vmap_info.kwargs_batch_dims)
-                assert all(k in vmap_info.kwargs_batch_dims for k in ref_kwargs.keys())
+                if len(ref_args) != len(vmap_info.args_batch_dims):
+                    raise ValueError(f'len(ref_args) ({len(ref_args)}) does not match '
+                                     f'args_batch_dims ({len(vmap_info.args_batch_dims)}).')
+                if len(ref_kwargs) != len(vmap_info.kwargs_batch_dims):
+                    raise ValueError(f'len(ref_kwargs) ({len(ref_kwargs)}) does not match '
+                                     f'kwargs_batch_dims ({len(vmap_info.kwargs_batch_dims)}).')
+                for k in ref_kwargs.keys():
+                    if k not in vmap_info.kwargs_batch_dims:
+                        raise ValueError(f'Key {k} is not in kwargs_batch_dims')
                 batch_dims += vmap_info.args_batch_dims
                 for key in ref_kwargs.keys():
                     batch_dims += (vmap_info.kwargs_batch_dims[key],)
@@ -299,7 +326,9 @@ class GradientMaker:
 
         def split_args(src_args: Tuple, ref_args: Tuple, ref_kwargs: OrderedDict[str, Any]):
             # split src_args into (args, kwargs) with the same structure as (ref_args, ref_kwargs)
-            assert len(src_args) == len(ref_args) + len(ref_kwargs.values())
+            if len(src_args) != len(ref_args) + len(ref_kwargs):
+                raise ValueError(f'len(src_args) ({len(src_args)}) does not match '
+                                 f'len(ref_args)+len(ref_kwargs) ({len(ref_args) + len(ref_kwargs)})')
             args = tuple([src_args[i] for i in range(len(ref_args))])
             kwargs = {}
             for i, key in enumerate(ref_kwargs.keys()):
@@ -333,19 +362,19 @@ class GradientMaker:
         return ft.hessian(model_loss_fn)(params)
 
     @torch.no_grad()
-    def loss_hvp(self, tangents=None, return_grad=False, return_output=False) \
-            -> Union[Tuple[Tensor, ...], Tuple[Tuple[Tensor, ...], Tuple[Tensor, ...]]]:
-        grad_fn, params = self._get_stateless_grad_fn_params_only(return_output=return_output)
+    def loss_hvp(self, tangents=None, accumulate_grad=True) -> Tuple[Tensor, ...]:
+        grad_fn, params = self._get_stateless_grad_fn_params_only()
         if tangents is None:
             tangents = self._get_random_tangents()
-        out = ft.jvp(grad_fn, (params,), (tangents,), has_aux=return_output)
-        # out = (grad, hvp) or (grad, hvp, output) if return_output
-        rst = (out[1],)
-        if return_grad:
-            rst += (out[0],)
-        if return_output:
-            rst += (out[2],)
-        return rst[0] if len(rst) == 1 else rst
+        grads, hvps = ft.jvp(grad_fn, (params,), (tangents,))
+        if accumulate_grad:
+            params = [p for p in self.model.parameters() if p.requires_grad]
+            for param, grad in zip(params, grads):
+                if param.grad is None:
+                    param.grad = grad
+                else:
+                    param.grad.add_(grad)
+        return hvps
 
     @torch.no_grad()
     def logit_jacobian(self) -> Tuple[Tensor, ...]:
@@ -366,12 +395,14 @@ class GradientMaker:
 
     def fvp(self, loss_type, data_size=None, tangents=None, return_model_output=False) \
             -> Union[Tuple[Tensor, ...], Tuple[Tuple[Tensor, ...], Tuple[Tensor, ...]]]:
-        assert loss_type in [LOSS_MSE, LOSS_CROSS_ENTROPY]
+        if loss_type not in [LOSS_MSE, LOSS_CROSS_ENTROPY]:
+            raise ValueError(f'Invalid loss type: {loss_type}. {[LOSS_CROSS_ENTROPY, LOSS_MSE]} are supported.')
         logit_fn, params = self._get_stateless_logit_fn_params_only()
         if tangents is None:
             tangents = self._get_random_tangents()
         y, jvp = ft.jvp(logit_fn, (params,), (tangents,))
-        assert y.ndim == 2  # n x c
+        if y.ndim != 2:  # n x c
+            raise ValueError(f'Number of output dimensions has to be 2. Got {y.ndim}.')
         if data_size is None:
             data_size = y.shape[0]
         if loss_type == LOSS_CROSS_ENTROPY:

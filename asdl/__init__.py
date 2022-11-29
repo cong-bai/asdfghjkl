@@ -11,5 +11,7 @@ from .fisher import *
 from .hessian import *
 from .precondition import *
 from .kernel import *
-from .fr import *
 from .counter import *
+
+
+__version__ = '0.1.0'

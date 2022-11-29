@@ -14,6 +14,7 @@ __all__ = [
     'get_n_cols_by_tril',
     'SymMatrix',
     'Kron',
+    'KFE',
     'Diag',
     'UnitWise'
 ]
@@ -31,7 +32,8 @@ def matrix_to_tril(mat: torch.Tensor):
        [2, 3, x], -> [1, 2, 3, 4, 5, 6]
        [4, 5, 6]]
     """
-    assert mat.ndim == 2
+    if mat.ndim != 2:
+        raise ValueError(f'mat.ndim has to be 2. Got {mat.ndim}.')
     tril_indices = torch.tril_indices(*mat.shape)
     return mat[tril_indices[0], tril_indices[1]]
 
@@ -46,7 +48,8 @@ def tril_to_matrix(tril: torch.Tensor):
       [1, 2, 3, 4, 5, 6] ->  [2, 3, 5],
                              [4, 5, 6]]
     """
-    assert tril.ndim == 1
+    if tril.ndim != 1:
+        raise ValueError(f'tril.ndim has to be 1. Got {tril.ndim}.')
     n_cols = get_n_cols_by_tril(tril)
     rst = torch.zeros(n_cols, n_cols, device=tril.device, dtype=tril.dtype)
     tril_indices = torch.tril_indices(n_cols, n_cols)
@@ -62,7 +65,8 @@ def get_n_cols_by_tril(tril: torch.Tensor):
 
     ncols^2 + ncols = 2 * tril.numel()
     """
-    assert tril.ndim == 1
+    if tril.ndim != 1:
+        raise ValueError(f'tril.ndim has to be 1. Got {tril.ndim}.')
     numel = tril.numel()
     return int(np.sqrt(2 * numel + 0.25) - 0.5)
 
@@ -203,17 +207,20 @@ class SymMatrix:
         return self
 
     def eigenvalues(self):
-        assert self.has_data
+        if not self.has_data:
+            raise ValueError('data do not exist.')
         eig = symeig(self.data)
         return torch.sort(eig, descending=True)[0]
 
     def top_eigenvalue(self):
-        assert self.has_data
+        if not self.has_data:
+            raise ValueError('data do not exist.')
         eig = symeig(self.data)
         return eig.max().item()
 
     def trace(self):
-        assert self.has_data
+        if not self.has_data:
+            raise ValueError('data do not exist.')
         return torch.diag(self.data).sum().item()
 
     def save(self, root, relative_dir):
@@ -322,7 +329,8 @@ class SymMatrix:
             return rst
 
         # layer-wise
-        assert vec_weight is not None or vec_bias is not None
+        if vec_weight is None and vec_bias is None:
+            raise ValueError('Either vec_weight or vec_bias has to be set.')
         vecs = []
         if vec_weight is not None:
             vecs.append(vec_weight.flatten())
@@ -404,12 +412,18 @@ class Kron:
         return self.B is not None
 
     @property
+    def has_inv(self):
+        return self.A_inv is not None and self.B_inv is not None
+
+    @property
     def A_dim(self):
         if self._A_dim is None:
             if self.A is not None:
                 self._A_dim = self.A.shape[-1]
             elif self.A_inv is not None:
                 self._A_dim = self.A_inv.shape[-1]
+            else:
+                raise ValueError('A nor A_inv has not been set.')
         return self._A_dim
 
     @property
@@ -419,6 +433,8 @@ class Kron:
                 self._B_dim = self.B.shape[-1]
             elif self.B_inv is not None:
                 self._B_dim = self.B_inv.shape[-1]
+            else:
+                raise ValueError('B nor B_inv has not been set.')
         return self._B_dim
 
     @property
@@ -481,19 +497,22 @@ class Kron:
         return pointer
 
     def update_inv(self, damping=_default_damping, calc_A_inv=True, calc_B_inv=True, eps=1e-7, replace=False):
-        assert self.has_data
+        if not self.has_data:
+            raise ValueError('data do not exist.')
+        damping_A = damping_B = damping
         if self.has_A and self.has_B:
             A_eig_mean = (self.A.trace() if self.A_is_square else torch.sum(self.A ** 2)) / self.A_dim
             B_eig_mean = (self.B.trace() if self.B_is_square else torch.sum(self.B ** 2)) / self.B_dim
             pi = torch.sqrt(A_eig_mean / B_eig_mean)
-            r = damping**0.5
-            damping_A = max(r * pi, eps)
-            damping_B = max(r / pi, eps)
-        else:
-            damping_A = damping_B = damping
+            if pi != 0 and pi != float('inf'):
+                r = damping**0.5
+                damping_A = max(r * pi, eps)
+                damping_B = max(r / pi, eps)
+
 
         if calc_A_inv:
-            assert self.has_A
+            if not self.has_A:
+                raise ValueError('A does not exist.')
             if not torch.all(self.A == 0):
                 if self.A_is_square:
                     self.A_inv = cholesky_inv(self.A, damping_A)
@@ -503,7 +522,8 @@ class Kron:
                     del self.A
                     self.A = None
         if calc_B_inv:
-            assert self.has_B
+            if not self.has_A:
+                raise ValueError('B does not exist.')
             if not torch.all(self.B == 0):
                 if self.B_is_square:
                     self.B_inv = cholesky_inv(self.B, damping_B)
@@ -545,6 +565,11 @@ class KFE:
     @property
     def has_scale(self):
         return self.scale is not None
+    
+    @property
+    def has_inv(self):
+        # KFE does not calculate the inverse matrix.
+        return False
 
     def update_inv(self, *args, **kwargs):
         pass
@@ -570,7 +595,8 @@ class KFE:
         return self
 
     def mvp(self, vec_weight, vec_bias=None, use_inv=False, inplace=False, eps=1.e-7):
-        assert not use_inv, 'KFE does not calculate the inverse matrix.'
+        if use_inv:
+            raise ValueError('KFE does not calculate the inverse matrix.')
         Ua, Ub = self.Ua, self.Ub
         vec_weight_2d = vec_weight.view(Ub.shape[0], -1)
         vec_weight_2d_kfe = Ub.mm(vec_weight_2d).mm(Ua)
@@ -616,13 +642,18 @@ class UnitWise:
     def has_data(self):
         return self.data is not None
 
+    @property
+    def has_inv(self):
+        return self.inv is not None
+
     def mul_(self, value):
         if self.has_data:
             self.data.mul_(value)
         return self
 
     def eigenvalues(self):
-        assert self.has_data
+        if not self.has_data:
+            raise ValueError('data do not exist.')
         eig = [symeig(block) for block in self.data]
         eig = torch.cat(eig)
         return torch.sort(eig, descending=True)[0]
@@ -651,7 +682,8 @@ class UnitWise:
         return pointer
 
     def update_inv(self, damping=_default_damping, replace=False):
-        assert self.has_data
+        if not self.has_data:
+            raise ValueError('data do not exist.')
         data = self.data
         if not torch.all(data == 0):
             diag = torch.diagonal(data, dim1=1, dim2=2)
@@ -734,6 +766,13 @@ class Diag:
     def has_bias(self):
         return self.bias is not None
 
+    @property
+    def has_inv(self):
+        has_inv = self.weight_inv is not None
+        if self.has_bias:
+            has_inv = has_inv and self.bias_inv is not None
+        return has_inv
+
     def mul_(self, value):
         if self.has_weight:
             self.weight.mul_(value)
@@ -807,7 +846,8 @@ class Diag:
                     self.bias = None
 
     def mvp(self, vec_weight=None, vec_bias=None, use_inv=False, inplace=False):
-        assert vec_weight is not None or vec_bias is not None
+        if vec_weight is None and vec_bias is None:
+            raise ValueError('Either vec_weight or vec_bias has to be set.')
         rst = []
         if vec_weight is not None:
             mat_w = self.weight_inv if use_inv else self.weight

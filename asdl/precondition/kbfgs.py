@@ -1,72 +1,53 @@
-from typing import Tuple, Union, Any, List
-from dataclasses import dataclass
 import math
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from ..core import extend, module_wise_assignments
+from ..core import extend
 from ..operations import OP_MEAN_INPUTS, OP_SPATIAL_MEAN_OUTPUTS, OP_SPATIAL_MEAN_OUTGRADS,\
     OP_OUT_SPATIAL_SIZE, OP_COV_KRON, OP_BFGS_KRON_S_AS, OperationContext
 from ..utils import cholesky_inv
 from ..symmatrix import SymMatrix
-from .prec_grad_maker import PreconditionedGradientMaker, PreconditionedGradientConfig
+from .prec_grad_maker import PreconditionedGradientMaker, PreconditioningConfig
 
 
-_supported_modules = (nn.Linear, nn.Conv2d)
-
-
-__all__ = ['KronBfgsGradientConfig', 'KronBfgsGradientMaker']
-
-
-@dataclass
-class KronBfgsGradientConfig(PreconditionedGradientConfig):
-    data_size: int = 1
-    damping: float = 1.e-5
-    ema_decay: float = 0.1
-    mu1: float = 0.2
-    ignore_modules: List[Any] = None
-    minibatch_hessian_action: bool = False
-    bfgs_attr: str = 'bfgs'
-    mean_outputs_attr: str = 'mean_outputs'
-    mean_outgrads_attr: str = 'mean_outgrads'
+__all__ = ['KronBfgsGradientMaker']
 
 
 class KronBfgsGradientMaker(PreconditionedGradientMaker):
-    def __init__(self, model: nn.Module, config: KronBfgsGradientConfig):
+    _supported_classes = (nn.Linear, nn.Conv2d)
+
+    def __init__(self, model: nn.Module, config: PreconditioningConfig,
+                 minibatch_hessian_action: bool = False, mu1: float = 0.2):
         super().__init__(model, config)
-        self.config: KronBfgsGradientConfig = config
-        self.modules = [m for m in module_wise_assignments(model, ignore_modules=config.ignore_modules)
-                        if isinstance(m, _supported_modules)]
         self._last_model_args = ()
         self._last_model_kwargs = dict()
         self._curr_model_args = ()
         self._curr_model_kwargs = dict()
         self._A_inv_exists = False
+        self._B_inv_exists = False
+        self.minibatch_hessian_action = minibatch_hessian_action
+        self.bfgs_attr = 'bfgs'
+        self.mu1 = mu1
+        self.mean_outputs_attr = 'mean_outputs'
+        self.mean_outgrads_attr = 'mean_outgrads'
 
-    def _forward_and_backward(self) -> Union[Tuple[Any, Tensor], Any]:
-        if self._step > 0 and self.do_update_preconditioner(self._step - 1):
-            self.post_preconditioner_update()
-        if self.do_update_preconditioner():
-            rst = self.update_preconditioner()
-        else:
-            rst = self.forward()
-            self._loss.backward()
+    def do_forward_and_backward(self, step=None):
+        return not self.do_update_preconditioner(step)
 
-        self.precondition()
-
-        return rst
+    def _startup(self):
+        step = self.state['step']
+        if step > 0 and self.do_update_preconditioner(step - 1):
+            self._post_preconditioner_update()
 
     def update_preconditioner(self):
-        model = self.model
-        config = self.config
-        if config.minibatch_hessian_action and self._A_inv_exists:
+        if self.minibatch_hessian_action and self._A_inv_exists:
             op_names = (OP_BFGS_KRON_S_AS, OP_SPATIAL_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE)
         else:
             op_names = (OP_COV_KRON, OP_MEAN_INPUTS, OP_SPATIAL_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE)
         op_names += (OP_SPATIAL_MEAN_OUTGRADS,)
-        with extend(model, *op_names, ignore_modules=config.ignore_modules) as cxt:
+        with extend(self.module_dict, *op_names) as cxt:
             rst = self.forward()
             self._update_A_inv(cxt)
             self._store_mean(cxt, is_forward=True)
@@ -75,16 +56,32 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
         self._record_model_args_kwargs()
         return rst
 
-    def post_preconditioner_update(self):
+    def _post_preconditioner_update(self):
         self._restore_last_model_args_kwargs()
         # another forward and backward using the previous model_args, kwargs
         op_names = (OP_SPATIAL_MEAN_OUTPUTS, OP_SPATIAL_MEAN_OUTGRADS, OP_OUT_SPATIAL_SIZE)
-        kwargs = dict(ignore_modules=self.config.ignore_modules)
-        with extend(self.model, *op_names, **kwargs) as cxt:
+        with extend(self.module_dict, *op_names) as cxt:
             self.forward()
             self._loss.backward()
             self._update_B_inv(cxt)
         self._restore_curr_model_args_kwargs()
+        self._B_inv_exists = True
+
+    def precondition(self):
+        if not self._B_inv_exists:
+            return
+        for module in self.module_dict.values():
+            matrix: SymMatrix = getattr(module, self.bfgs_attr)
+            vec_weight = module.weight.grad
+            if vec_weight is None:
+                raise ValueError('gradient has not been calculated.')
+            if module.bias is not None and module.bias.requires_grad:
+                vec_bias = module.bias.grad
+                if vec_bias is None:
+                    raise ValueError('gradient has not been calculated.')
+            else:
+                vec_bias = None
+            matrix.kron.mvp(vec_weight=vec_weight, vec_bias=vec_bias, use_inv=True, inplace=True)
 
     def _record_model_args_kwargs(self):
         self._last_model_args = self._model_args
@@ -102,16 +99,16 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
 
     def _update_A_inv(self, cxt: OperationContext):
         config = self.config
-        for module in self.modules:
-            damping = self.get_damping(cxt, module, is_A=True)
-            bfgs = getattr(module, config.bfgs_attr, None)
-            if config.minibatch_hessian_action and self._A_inv_exists:
+        for module in self.module_dict.values():
+            damping = self._get_damping(cxt, module, is_A=True)
+            bfgs = getattr(module, self.bfgs_attr, None)
+            if self.minibatch_hessian_action and self._A_inv_exists:
                 s, As = cxt.bfgs_kron_s_As(module)
                 y = As + damping * s
             else:
                 new_bfgs = cxt.cov_symmatrix(module, pop=True).mul_(1/config.data_size)
                 if bfgs is None:
-                    setattr(module, config.bfgs_attr, new_bfgs)
+                    setattr(module, self.bfgs_attr, new_bfgs)
                     bfgs = new_bfgs
                 else:
                     # update the exponential moving average (EMA) of A
@@ -124,36 +121,35 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
                 mean_in_data = cxt.mean_in_data(module)
                 s = torch.mv(bfgs.kron.A_inv, mean_in_data)
                 y = torch.mv(A, s) + damping * s
-            assert bfgs is not None, f'Matrix for {module} is not calculated yet.'
+            if bfgs is None:
+                raise ValueError(f'Matrix for {module} is not calculated yet.')
             H = bfgs.kron.A_inv
             bfgs_inv_update_(H, s, y)
         self._A_inv_exists = True
 
     def _store_mean(self, cxt: OperationContext, is_forward=True):
-        config = self.config
-        for module in self.modules:
+        for module in self.module_dict.values():
             if is_forward:
-                setattr(module, config.mean_outputs_attr, cxt.spatial_mean_out_data(module))
+                setattr(module, self.mean_outputs_attr, cxt.spatial_mean_out_data(module))
             else:
-                setattr(module, config.mean_outgrads_attr, cxt.spatial_mean_out_grads(module))
+                setattr(module, self.mean_outgrads_attr, cxt.spatial_mean_out_grads(module))
 
     def _update_B_inv(self, cxt: OperationContext):
-        config = self.config
-        for module in self.modules:
-            damping = self.get_damping(cxt, module, is_A=False)
-            bfgs = getattr(module, config.bfgs_attr)
-            s = cxt.spatial_mean_out_data(module) - getattr(module, config.mean_outputs_attr)
-            y = cxt.spatial_mean_out_grads(module) - getattr(module, config.mean_outgrads_attr)
+        for module in self.module_dict.values():
+            damping = self._get_damping(cxt, module, is_A=False)
+            bfgs = getattr(module, self.bfgs_attr)
+            s = cxt.spatial_mean_out_data(module) - getattr(module, self.mean_outputs_attr)
+            y = cxt.spatial_mean_out_grads(module) - getattr(module, self.mean_outgrads_attr)
             if bfgs.kron.B_inv is None:
                 bfgs.kron.B_inv = torch.eye(s.shape[0], device=s.device)
             H = bfgs.kron.B_inv
             if isinstance(module, nn.Conv2d):
                 s = s.mean(dim=0)
                 y = y.mean(dim=0)
-            powell_lm_damping_(H, s, y, mu1=config.mu1, mu2=damping)
+            powell_lm_damping_(H, s, y, mu1=self.mu1, mu2=damping)
             bfgs_inv_update_(H, s, y)
 
-    def get_damping(self, cxt: OperationContext, module: nn.Module, is_A=True):
+    def _get_damping(self, cxt: OperationContext, module: nn.Module, is_A=True):
         damping = self.config.damping
         sqrt_damping = math.sqrt(damping)
         if isinstance(module, nn.Conv2d):
@@ -168,22 +164,12 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
         else:
             return sqrt_damping
 
-    def precondition(self, vec_weight: Tensor = None, vec_bias: Tensor = None):
-        config = self.config
-        for module in self.modules:
-            matrix: SymMatrix = getattr(module, config.bfgs_attr)
-            if vec_weight is None and module.weight.requires_grad:
-                vec_weight = module.weight.grad
-            assert vec_weight is not None, 'gradient has not been calculated.'
-            if module.bias is not None and module.bias.requires_grad:
-                vec_bias = module.bias.grad
-                assert vec_bias is not None, 'gradient has not been calculated.'
-            matrix.kron.mvp(vec_weight=vec_weight, vec_bias=vec_bias, use_inv=True, inplace=True)
-
 
 def powell_lm_damping_(H: Tensor, s: Tensor, y: Tensor, mu1: float, mu2: float):
-    assert 0 < mu1 < 1
-    assert mu2 > 0
+    if mu1 <= 0 or 1 <= mu1:
+        raise ValueError(f'mu1 has to be in (0, 1). Got {mu1}.')
+    if mu2 <= 0:
+        raise ValueError(f'mu2 has to be > 0. Got {mu2}.')
     Hy = torch.mv(H, y)
     ytHy = torch.dot(y, Hy)
     sty = torch.dot(s, y)
@@ -201,17 +187,21 @@ def bfgs_inv_update_(H: Tensor, s: Tensor, y: Tensor):
     https://en.wikipedia.org/wiki/Broyden%E2%80%93Fletcher%E2%80%93Goldfarb%E2%80%93Shanno_algorithm
     """
     msg = f'H has to be a {Tensor} containing a symmetric matrix.'
-    assert H.ndim == 2 and torch.all(H.T == H), msg
+    if H.ndim != 2 or torch.any(H.T != H):
+        raise ValueError(msg)
     d1, d2 = H.shape
-    assert d1 == d2, msg
+    if d1 != d2:
+        raise ValueError(msg)
     msg = f' has to be a {Tensor} containing a vector of same dimension as H.'
-    assert s.ndim == 1 and s.shape[0] == d1, 's' + msg
-    assert y.ndim == 1 and y.shape[0] == d1, 'y' + msg
+    if s.ndim != 1 or s.shape[0] != d1:
+        raise ValueError('s' + msg)
+    if y.ndim != 1 or y.shape[0] != d1:
+        raise ValueError('s' + msg)
 
     sty = torch.dot(s, y)  # s^ty
     Hy = torch.mv(H, y)  # Hy
     Hyst = torch.outer(Hy, s)  # Hys^t
     ytHy = torch.dot(y, Hy)  # y^tHy
     sst = torch.outer(s, s)  # ss^t
-    H.add_((sty + ytHy) @ sst / (sty ** 2))
+    H.add_(sst.mul_(sty + ytHy).div_(sty ** 2))
     H.sub_((Hyst + Hyst.T) / sty)

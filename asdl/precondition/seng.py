@@ -1,27 +1,18 @@
-from typing import Union, Any, Tuple, Dict
+from typing import Dict
 from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
 from torch import Tensor
-from .prec_grad_maker import PreconditionedGradientMaker, PreconditionedGradientConfig
+from .prec_grad_maker import PreconditionedGradientMaker, PreconditioningConfig
 from ..core import extend
-from ..utils import cholesky_inv, has_reduction
+from ..utils import cholesky_inv
 from ..operations import OP_SKETCHED_GRAM
 
 
-__all__ = ['SengGradientMaker', 'SengGradientConfig']
+__all__ = ['SengGradientMaker']
 
 _invalid_data_size = -1
-
-
-@dataclass
-class SengGradientConfig(PreconditionedGradientConfig):
-    data_size: int = _invalid_data_size
-    damping: float = 1.e-7
-    subsample_size: int = None
-    sketching_size: int = 256
-    truncated_rank: int = 16
 
 
 @dataclass
@@ -39,41 +30,30 @@ _supported_modules = (nn.Linear, nn.Conv2d)
 
 
 class SengGradientMaker(PreconditionedGradientMaker):
-    def __init__(self, model: nn.Module, config: SengGradientConfig):
+    _loss_reduction = 'sum'
+    _supported_classes = (nn.Linear, nn.Conv2d)
+
+    def __init__(self, model: nn.Module, config: PreconditioningConfig,
+                 subsample_size: int = None, sketching_size: int = 256, truncated_rank: int = 16):
         super().__init__(model, config)
-        self.config: SengGradientConfig = config
-        assert config.data_size != _invalid_data_size, 'data_size is not set.'
-        self._modules = [m for m in model.modules() if isinstance(m, _supported_modules)]
+        if config.data_size == _invalid_data_size:
+            raise ValueError('data_size is not set.')
         self._curvature_info: Dict[nn.Module, SketchedEmpFisherInfo] = {}
+        self.subsample_size = subsample_size
+        self.sketching_size = sketching_size
+        self.truncated_rank = truncated_rank
 
-    def _forward_and_backward(self, *args, **kwargs) -> Union[Tuple[Any, Tensor], Any]:
-        if self.do_update_curvature():
-            rst = self.update_curvature()
-        else:
-            rst = self.forward()
-            self.backward()
-        with torch.no_grad():
-            self._loss /= self.config.data_size
-        self.precondition()
-        return rst
-
-    def _call_loss_fn(self) -> Tensor:
-        assert has_reduction(self._loss_fn), 'loss_fn has to have "reduction" option'
-        if isinstance(self._loss_fn, nn.Module):
-            self._loss_fn.reduction = 'sum'
-        else:
-            self._loss_fn_kwargs['reduction'] = 'sum'
-        args, kwargs = self._get_mapped_loss_fn_args_kwargs()
-        return self._loss_fn(*args, **kwargs)
+    def do_forward_and_backward(self, step=None):
+        return not self.do_update_curvature(step)
 
     def update_curvature(self):
         config = self.config
         with extend(self.model, OP_SKETCHED_GRAM) as cxt:
-            cxt.set_sketching_size(config.sketching_size)
-            cxt.set_truncated_rank(config.truncated_rank)
+            cxt.set_sketching_size(self.sketching_size)
+            cxt.set_truncated_rank(self.truncated_rank)
             rst = self.forward()
             self.backward()
-            for module in self._modules:
+            for module in self.module_dict.values():
                 data, sketches, indices, gram = cxt.sketched_inputs_outgrads_gram(module)
                 gram_inv = cholesky_inv(gram.div_(config.data_size), config.damping)
                 self._curvature_info[module] = SketchedEmpFisherInfo(*data, *sketches, *indices, gram_inv)
@@ -134,6 +114,10 @@ class SengGradientMaker(PreconditionedGradientMaker):
                 module.bias.grad.copy_(g[:, -1].flatten())  # d_out
             else:
                 module.weight.grad.copy_(g.contiguous().view_as(module.weight))  # d_out x d_in
+
+    def _teardown(self):
+        with torch.no_grad():
+            self._loss /= self.config.data_size
 
 
 def maybe_unsqueeze_to_3d(tensor: Tensor):

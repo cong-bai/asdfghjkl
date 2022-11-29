@@ -10,7 +10,7 @@ import torch.distributed as dist
 
 from .core import no_centered_cov
 from .operations import OperationContext
-from .utils import skip_param_grad, has_reduction
+from .utils import skip_param_grad
 from .grad_maker import GradientMaker, LOSS_CROSS_ENTROPY, LOSS_MSE
 from .matrices import *
 from .vector import ParamVector, reduce_vectors
@@ -45,6 +45,8 @@ class FisherConfig:
 
 
 class FisherMaker(GradientMaker):
+    _loss_reduction = 'sum'
+
     def __init__(self, model, config):
         super().__init__(model)
         self.config: FisherConfig = config
@@ -72,8 +74,10 @@ class FisherMaker(GradientMaker):
                              fvp=False,
                              damping=None,
                              vec: ParamVector = None) -> Union[Tuple[Any, Tensor], Any]:
-        assert not (accumulate and calc_inv), 'accumulate and calc_inv cannot be True at the same time.'
-        assert not (fvp and calc_inv), 'fvp and calc_inv cannot be True at the same time.'
+        if accumulate and calc_inv:
+            raise ValueError('accumulate and calc_inv cannot be True at the same time.')
+        if fvp and calc_inv:
+            raise ValueError('fvp and calc_inv cannot be True at the same time.')
         model = self.model
         config = self.config
         fisher_shapes = config.fisher_shapes
@@ -83,7 +87,8 @@ class FisherMaker(GradientMaker):
         seed = config.seed
         if data_size == _invalid_data_size:
             data_size = config.data_size  # refer config value (default: _invalid_data_size)
-        assert data_size != _invalid_data_size, 'data_size is not specified.'
+        if data_size == _invalid_data_size:
+            raise ValueError('data_size is not specified.')
         if scale is None:
             scale = config.scale  # refer config value (default: 1)
         scale /= data_size
@@ -184,15 +189,6 @@ class FisherMaker(GradientMaker):
         if fisher is not None:
             fisher.update_inv(damping=damping, replace=True)
 
-    def _call_loss_fn(self) -> Tensor:
-        assert has_reduction(self._loss_fn), 'loss_fn has to have "reduction" option'
-        if isinstance(self._loss_fn, nn.Module):
-            self._loss_fn.reduction = 'sum'
-        else:
-            self._loss_fn_kwargs['reduction'] = 'sum'
-        args, kwargs = self._get_mapped_loss_fn_args_kwargs()
-        return self._loss_fn(*args, **kwargs)
-
     def _fisher_loop(self, closure):
         raise NotImplementedError
 
@@ -203,8 +199,8 @@ class FisherMaker(GradientMaker):
         data = fisher
         for key in keys:
             data = getattr(data, key, None)
-        if data is not None:
-            assert isinstance(data, torch.Tensor)
+        if data is not None and not isinstance(data, torch.Tensor):
+            raise TypeError(f'data have to be {torch.Tensor}, got {type(data)}.')
         return data
 
     def reduce_scatter_fisher(self,
@@ -213,12 +209,18 @@ class FisherMaker(GradientMaker):
                               with_grad=False,
                               group: dist.ProcessGroup = None,
                               async_op=False):
-        assert dist.is_initialized()
-        assert torch.cuda.is_available()
-        assert dist.get_backend(group) == dist.Backend.NCCL
+        if not dist.is_initialized():
+            raise EnvironmentError('torch.distributed is not initialized.')
+        if not torch.cuda.is_available():
+            raise EnvironmentError('CUDA is not available.')
+        if dist.get_backend(group) != dist.Backend.NCCL:
+            raise EnvironmentError('Backend has to be NCCL.')
         world_size = dist.get_world_size(group)
-        assert len(module_partitions) == world_size
-        assert all(len(module_partitions[0]) == len(module_partitions[i]) for i in range(1, world_size))
+        if len(module_partitions) != world_size:
+            raise ValueError(f'Number of partitions has to be world_size. Got {len(module_partitions)}')
+        if any(len(module_partitions[0]) != len(module_partitions[i]) for i in range(1, world_size)):
+            raise ValueError(f'Number of members in each partition has to be the same. '
+                             f'Got {[len(module_partitions[i]) for i in range(world_size)]}')
         tensor_partitions = []
         for module_list in module_partitions:
             tensor_list = []
@@ -226,7 +228,8 @@ class FisherMaker(GradientMaker):
                 tensor = self.get_fisher_tensor(module, *keys)
                 if tensor is None:
                     continue
-                assert tensor.is_cuda
+                if not tensor.is_cuda:
+                    raise ValueError('Tensor is not on CUDA device.')
                 tensor_list.append(tensor)
                 if with_grad:
                     for p in module.parameters():
@@ -234,7 +237,9 @@ class FisherMaker(GradientMaker):
                             tensor_list.append(p.grad)
             tensor_partitions.append(tensor_list)
         num_tensors_per_partition = len(tensor_partitions[0])
-        assert all(len(tensor_partitions[i]) == num_tensors_per_partition for i in range(1, world_size))
+        if any(len(tensor_partitions[i]) != num_tensors_per_partition for i in range(1, world_size)):
+            raise ValueError(f'Number of tensors in every partition has to be {num_tensors_per_partition}. '
+                             f'Got {[len(tensor_partitions[i]) for i in range(world_size)]}')
         handles = []
         for i in range(num_tensors_per_partition):
             input_list = [tensor_list[i] for tensor_list in tensor_partitions]
@@ -250,7 +255,8 @@ class FisherMaker(GradientMaker):
                       dst=0,
                       group: dist.ProcessGroup = None,
                       async_op=False):
-        assert dist.is_initialized()
+        if not dist.is_initialized():
+            raise ValueError('torch.distributed is not initialized.')
         tensor_list = []
         for module in modules:
             tensor = self.get_fisher_tensor(module, *keys)
@@ -440,7 +446,6 @@ class FisherMCCrossEntropy(FisherMaker):
 
     def _fisher_loop(self, closure):
         logits = self._logits
-        log_probs = F.log_softmax(logits, dim=-1)
         n_mc_samples = self.config.n_mc_samples
         probs = F.softmax(logits, dim=-1)
         log_probs = F.log_softmax(logits, dim=-1)
@@ -497,10 +502,12 @@ class FisherEmp(FisherMaker):
 def get_fisher_maker(model: nn.Module, config: FisherConfig):
     fisher_type = config.fisher_type
     loss_type = config.loss_type
-    assert fisher_type in _supported_types
+    if fisher_type not in _supported_types:
+        raise ValueError(f'Invalid fisher_type: {fisher_type}. {_supported_types} are supported.')
     if fisher_type == FISHER_EMP:
         return FisherEmp(model, config)
-    assert loss_type in [LOSS_CROSS_ENTROPY, LOSS_MSE]
+    if loss_type not in [LOSS_CROSS_ENTROPY, LOSS_MSE]:
+        raise ValueError(f'Invalid loss_type: {loss_type}. {[LOSS_CROSS_ENTROPY, LOSS_MSE]} are supported.')
     if fisher_type == FISHER_EXACT:
         if loss_type == LOSS_CROSS_ENTROPY:
             return FisherExactCrossEntropy(model, config)
