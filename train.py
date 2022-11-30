@@ -11,7 +11,7 @@ from ray import tune
 from timm.data.transforms_factory import create_transform
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from torchvision.datasets import CIFAR10, ImageFolder
+from torchvision.datasets import CIFAR10, CIFAR100, ImageFolder
 
 import asdl
 from asdl import FISHER_MC, FISHER_EMP
@@ -117,6 +117,9 @@ def main(args):
     if args.dataset == "cifar10":
         dataset = CIFAR10(root=args.data_path, transform=train_transform, download=True)
         dataset_test = CIFAR10(root=args.data_path, train=False, transform=val_transform)
+    if args.dataset == "cifar100":
+        dataset = CIFAR100(root=args.data_path, transform=train_transform, download=True)
+        dataset_test = CIFAR100(root=args.data_path, train=False, transform=val_transform)
     elif args.dataset == "imagenet":
         dataset = ImageFolder(args.traindir, transform=train_transform)
         dataset_test = ImageFolder(args.valdir, transform=val_transform)
@@ -273,7 +276,7 @@ def get_args_parser():
     parser.add_argument("--use-deterministic-algorithms", action="store_true")
 
     parser.add_argument("--wandb", action="store_true")
-    parser.add_argument("--wandb-mode", type=str)
+    parser.add_argument("--wandb-mode", default="online", type=str)
     parser.add_argument("--wandb-project", type=str)
     parser.add_argument("--wandb-tag", default=None, type=str)
 
