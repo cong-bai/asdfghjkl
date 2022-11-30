@@ -186,7 +186,7 @@ def main(args):
         )
         grad_maker = asdl.KfacGradientMaker(model, config, swift=False)
     elif opt_name == "shampoo":
-        config = asdl.ShampooGradientConfig(
+        config = asdl.PreconditioningConfig(
             curvature_upd_interval=args.cov_update_freq,
             preconditioner_upd_interval=args.inv_update_freq,
             damping=args.damping,
