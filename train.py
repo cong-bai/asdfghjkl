@@ -142,7 +142,7 @@ def main(args):
     if args.model.startswith("timm_"):
         model = timm.create_model(
             args.model.replace("timm_", ""), pretrained=args.pretrained, num_classes=num_classes
-        )
+        ) # Add the img_size kwarg if finetune ViT on different image size
     else:
         model = torchvision.models.__dict__[args.model](
             pretrained=args.pretrained, num_classes=num_classes
