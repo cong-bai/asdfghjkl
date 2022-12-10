@@ -141,7 +141,7 @@ class KronBfgsGradientMaker(PreconditionedGradientMaker):
             s = cxt.spatial_mean_out_data(module) - getattr(module, self.mean_outputs_attr)
             y = cxt.spatial_mean_out_grads(module) - getattr(module, self.mean_outgrads_attr)
             if bfgs.kron.B_inv is None:
-                bfgs.kron.B_inv = torch.eye(s.shape[0], device=s.device)
+                bfgs.kron.B_inv = torch.eye(s.shape[-1], device=s.device)
             H = bfgs.kron.B_inv
             if isinstance(module, nn.Conv2d):
                 s = s.mean(dim=0)
@@ -187,6 +187,7 @@ def bfgs_inv_update_(H: Tensor, s: Tensor, y: Tensor):
     https://en.wikipedia.org/wiki/Broyden%E2%80%93Fletcher%E2%80%93Goldfarb%E2%80%93Shanno_algorithm
     """
     msg = f'H has to be a {Tensor} containing a symmetric matrix.'
+    H = (H+H.T)/2
     if H.ndim != 2 or torch.any(H.T != H):
         raise ValueError(msg)
     d1, d2 = H.shape
