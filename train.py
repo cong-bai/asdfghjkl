@@ -45,10 +45,7 @@ def train_one_epoch(model, optimizer, grad_maker, data_loader, use_wandb=False, 
         optimizer.zero_grad()
         dummy_y = grad_maker.setup_model_call(model, image)
         grad_maker.setup_loss_call(loss_func, dummy_y, target)
-        if isinstance(grad_maker, asdl.precondition.natural_gradient.KfacGradientMaker):
-            output, loss = grad_maker.forward_and_backward(accumulate=True)
-        else:
-            output, loss = grad_maker.forward_and_backward()
+        output, loss = grad_maker.forward_and_backward()
         if clip_grad_norm:
             norm = nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
         optimizer.step()
@@ -164,27 +161,25 @@ def main(args):
                               weight_decay=args.weight_decay, nesterov=args.nesterov)
 
     if opt_name == "kfac_mc":
-        config = asdl.NaturalGradientConfig(
+        config = asdl.PreconditioningConfig(
             data_size=args.batch_size,
-            fisher_type=FISHER_MC,
             damping=args.damping,
             curvature_upd_interval=args.cov_update_freq,
             preconditioner_upd_interval=args.inv_update_freq,
             ignore_modules=[nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm],
             ema_decay=args.ema_decay,
         )
-        grad_maker = asdl.KfacGradientMaker(model, config, swift=False)
+        grad_maker = asdl.KfacGradientMaker(model, config, fisher_type=FISHER_MC)
     elif opt_name == "kfac_emp":
-        config = asdl.NaturalGradientConfig(
+        config = asdl.PreconditioningConfig(
             data_size=args.batch_size,
-            fisher_type=FISHER_EMP,
             damping=args.damping,
             curvature_upd_interval=args.cov_update_freq,
             preconditioner_upd_interval=args.inv_update_freq,
             ignore_modules=[nn.BatchNorm1d, nn.BatchNorm2d, nn.LayerNorm],
             ema_decay=args.ema_decay,
         )
-        grad_maker = asdl.KfacGradientMaker(model, config, swift=False)
+        grad_maker = asdl.KfacGradientMaker(model, config, fisher_type=FISHER_EMP)
     elif opt_name == "shampoo":
         config = asdl.PreconditioningConfig(
             curvature_upd_interval=args.cov_update_freq,
