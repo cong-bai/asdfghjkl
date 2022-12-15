@@ -1,4 +1,5 @@
 from contextlib import contextmanager, nullcontext
+import warnings
 
 import torch.cuda
 import torch.nn as nn
@@ -35,6 +36,16 @@ def extend(model,
             op_class = get_op_class(module)
             if op_class is None:
                 continue
+
+            # extract supported operation names
+            _supported_op_names = []
+            for op_name in _op_names:
+                if op_name in op_class.supported_operations:
+                    _supported_op_names.append(op_name)
+                else:
+                    warnings.warn(f'{op_name} operation is not supported for {module}. Skip.')
+            _op_names = _supported_op_names
+
             cxt.register_operation(module, op_class(module, _op_names, model_for_kernel=model))
             has_fwd_op = any(op_name in FWD_OPS for op_name in _op_names)
             has_bwd_op = any(op_name in BWD_OPS for op_name in _op_names)
@@ -108,12 +119,6 @@ def save_outgrads(model: nn.Module, targets=None, ignore_modules=None) -> Operat
     else:
         assign_rules = [OP_SAVE_OUTGRADS]
     return extend(model, *assign_rules, ignore_modules=ignore_modules)
-
-
-def supported_modules(model):
-    for module in model.modules():
-        if isinstance(module, _supported_module_classes):
-            yield module
 
 
 def named_supported_modules(model):
@@ -228,7 +233,8 @@ def module_wise_assignments(model, *assign_rules, ignore_modules=None, map_rule=
         if module in specified_asgmts:
             yield *module_info, specified_asgmts[module]
         elif any(isinstance(key, str) and key in name for key in specified_asgmts):
-            key = next(key for key in specified_asgmts if isinstance(key, str) and key in name)
+            key = next(key for key in specified_asgmts if isinstance(
+                key, str) and key in name)
             yield *module_info, specified_asgmts[key]
         elif module.__class__ in specified_asgmts:
             yield *module_info, specified_asgmts[module.__class__]

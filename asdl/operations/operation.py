@@ -31,7 +31,6 @@ OP_GRAM_DIRECT = 'gram_direct'  # direct
 OP_GRAM_HADAMARD = 'gram_hada'  # Hadamard-factored
 OP_SKETCHED_GRAM = 'sketched_gram'  # apply sketching matrix to gram
 
-
 OP_BATCH_GRADS = 'batch_grads'  # compute batched gradients (per-example gradients)
 OP_SAVE_INPUTS = 'save_inputs'  # save inputs during a forward-pass
 OP_SAVE_OUTPUTS = 'save_outputs'  # save outputs during a forward-pass
@@ -63,7 +62,8 @@ FWD_OPS = [OP_SAVE_INPUTS, OP_SAVE_OUTPUTS,
            OP_COV_KRON, OP_COV_SWIFT_KRON,
            OP_RFIM_RELU, OP_RFIM_SOFTMAX,
            OP_MEAN_INPUTS, OP_MEAN_OUTPUTS,
-           OP_SPATIAL_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE]
+           OP_SPATIAL_MEAN_OUTPUTS, OP_OUT_SPATIAL_SIZE, OP_BFGS_KRON_S_AS]
+
 BWD_OPS_WITH_INPUTS = [OP_COV, OP_COV_INV, OP_CVP,
                        OP_COV_KRON_INV, OP_COV_SWIFT_KRON_INV,
                        OP_COV_UNIT_WISE, OP_COV_UNIT_WISE_INV,
@@ -71,14 +71,22 @@ BWD_OPS_WITH_INPUTS = [OP_COV, OP_COV_INV, OP_CVP,
                        OP_GRAM_HADAMARD, OP_GRAM_DIRECT,
                        OP_BATCH_GRADS, OP_COV_KFE,
                        OP_SKETCHED_GRAM]
+
 BWD_OPS = [OP_SAVE_OUTGRADS,
            OP_COV_KRON, OP_COV_SWIFT_KRON,
            OP_RFIM_RELU, OP_RFIM_SOFTMAX,
            OP_MEAN_OUTGRADS, OP_SPATIAL_MEAN_OUTGRADS] \
           + BWD_OPS_WITH_INPUTS
 
+BASIC_OPS = [OP_FULL_COV, OP_FULL_CVP,
+             OP_SAVE_INPUTS, OP_SAVE_OUTPUTS,
+             OP_SAVE_OUTGRADS, OP_COV, OP_COV_INV,
+             OP_CVP, OP_GRAM_DIRECT]
+
 
 class Operation:
+    supported_operations = set(ALL_OPS)
+
     def __init__(self, module, op_names, model_for_kernel=None):
         if hasattr(module, 'weight'):
             requires_grad = module.weight.requires_grad
@@ -260,6 +268,7 @@ class Operation:
                 A = self.cov_kron_A(module, in_data).mul_(cov_scale)
                 del in_data
                 B = self.cov_kron_B(module, out_grads).mul_(cov_scale)
+
                 damping_A, damping_B = self.cov_kron_damping(A, B)
                 A_inv = cholesky_inv(A, damping_A)
                 del A
@@ -272,9 +281,10 @@ class Operation:
                 self.accumulate_result(B, OP_COV_KRON, 'B')  # not OP_COV_SWIFT_KRON
             elif op_name == OP_COV_SWIFT_KRON_INV:
                 A = self.cov_swift_kron_A(module, in_data)
+                del in_data
                 B = self.cov_swift_kron_B(module, out_grads)
                 damping_A, damping_B = self.cov_kron_damping(A, B)
-                del in_data
+
                 if A.shape[0] == A.shape[1]:
                     A_inv = cholesky_inv(A.mul_(cov_scale), damping_A)
                 else:
