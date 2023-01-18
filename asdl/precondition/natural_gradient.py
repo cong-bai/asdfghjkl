@@ -84,6 +84,14 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
             self.shape_for[module] = shapes[0]
             self.shape_for[name] = shapes[0]
         self._named_modules_for = {}
+        self.param_with_grad_no_curvature = []
+        param_for_curvature = []
+        for name, module in self.named_modules_for_curvature:
+            for subname, _ in module.named_parameters():
+                param_for_curvature.append(name.replace("/", ".") + "." + subname)
+        for name, param in model.named_parameters():
+            if name not in param_for_curvature and param.requires_grad:
+                self.param_with_grad_no_curvature.append(param)
 
         fisher_config = FisherConfig(
             fisher_type=fisher_type,
@@ -605,23 +613,10 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
         assert kron is None and diag is None
         group = self.sync_group
 
-        rank = 0
         tensor_list = []
         for enum_shape, shape in enumerate(_module_level_shapes):
             keys_list = self._keys_list_from_shape(shape)
-            for enum_module, name_module in enumerate(self.named_modules_for(shape)):
-
-                # we will send when we reached the end of the partitioned rank
-                if rank != self.partitions[enum_shape][enum_module]:
-                    vector = parameters_to_vector(tensor_list)
-                    dist.reduce(vector, rank, op=dist.ReduceOp.AVG, group=group)
-                    if self.world_rank == rank:
-                        vector_to_parameters(vector, tensor_list)
-                    rank += 1
-                    assert rank == self.partitions[enum_shape][enum_module]
-                    tensor_list = []
-
-                name, module = name_module
+            for enum_module, (name, module) in enumerate(self.named_modules_for(shape)):
 
                 for keys in keys_list:
                     tensor = self.fisher_maker.get_fisher_tensor(module, *keys)
@@ -635,13 +630,12 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
                         if p.requires_grad and p.grad is not None:
                             tensor_list.append(p.grad)
 
-        #last reduce for last rank
-        vector = parameters_to_vector(tensor_list)
-        dist.reduce(vector, rank, op=dist.ReduceOp.AVG, group=group)
-        if self.world_rank == rank:
-            vector_to_parameters(vector, tensor_list)
-
-        assert rank < self.world_size
+                vector = parameters_to_vector(tensor_list)
+                dest_rank = self.partitions[enum_shape][enum_module]
+                dist.reduce(vector, dest_rank, op=dist.ReduceOp.AVG, group=group)
+                if self.world_rank == dest_rank:
+                    vector_to_parameters(vector, tensor_list)
+                tensor_list = []
 
     def reduce_curvature(self, module_name, kron=None, diag=None, with_grad=False):
         module_partitions = self.module_partitions
@@ -717,44 +711,29 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
     def all_gather_or_reduce_grad(self):
         group = self.sync_group
 
-        rank = 0
         tensor_list = []
-        tensor_list_not_prec = []
         for enum_shape, shape in enumerate(_module_level_shapes):
             for enum_module, module in enumerate(self.modules_for(shape)):
+
+                # TODO: check if there are miss and duplicate
+                assert self.is_module_for_inv_and_precondition(module)
+                for p in module.parameters():
+                    if p.requires_grad and p.grad is not None:
+                        tensor_list.append(p.grad)
                 
-                # we will broadcast when we reached the end of the partitioned rank
-                if rank != self.partitions[enum_shape][enum_module]:
-                    if len(tensor_list) > 0:
-                        vector = parameters_to_vector(tensor_list)
-                        dist.broadcast(vector, rank, group=group)
-                        vector_to_parameters(vector, tensor_list)
-                    rank += 1
-                    assert rank == self.partitions[enum_shape][enum_module]
-                    tensor_list = []
-
-                if self.is_module_for_inv_and_precondition(module):
-                    for p in module.parameters():
-                        if p.requires_grad and p.grad is not None:
-                            tensor_list.append(p.grad)
-                else:
-                    for p in module.parameters():
-                        if p.requires_grad and p.grad is not None:
-                            tensor_list_not_prec.append(p.grad)
-
-        #last broadcast of last rank
-        if len(tensor_list) > 0:
-            vector = parameters_to_vector(tensor_list)
-            dist.broadcast(vector, rank, group=group)
-            vector_to_parameters(vector, tensor_list)
-
-        assert rank < self.world_size
+                src_rank = self.partitions[enum_shape][enum_module]
+                if len(tensor_list) > 0:
+                    vector = parameters_to_vector(tensor_list)
+                    dist.broadcast(vector, src_rank, group=group)
+                    vector_to_parameters(vector, tensor_list)
+                tensor_list = []
 
         # all_reduce all grads, which do not need prec
-        if len(tensor_list_not_prec) > 0:
-            vector = parameters_to_vector(tensor_list_not_prec)
+        if len(self.param_with_grad_no_curvature) > 0:
+            grad_list = [param.grad for param in self.param_with_grad_no_curvature]
+            vector = parameters_to_vector(grad_list)
             dist.all_reduce(vector, op=dist.ReduceOp.AVG, group=group)
-            vector_to_parameters(vector, tensor_list_not_prec)
+            vector_to_parameters(vector, grad_list)
 
     def all_gather_grad(self, async_op=False):
         self._scatter_or_gather_grad('gather', async_op=async_op)
@@ -805,6 +784,7 @@ class NaturalGradientMaker(PreconditionedGradientMaker):
         module_list = nn.ModuleList([m for m in self.modules_for_curvature if m not in self.partitioned_modules])
         self._all_reduce_grad(module_list, async_op=async_op)
 
+    # TODO: Fix this function
     def all_reduce_no_curvature_grad(self, async_op=False):
         module_list = nn.ModuleList([m for m in self.model.modules()
                                      if len(list(m.children())) == 0 and m not in self.modules_for_curvature])
